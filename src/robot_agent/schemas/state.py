@@ -119,19 +119,15 @@ STATE_P2_URDF_VALID = "phase2.urdf.valid"
 # URDF 问题列表。
 STATE_P2_URDF_ISSUES = "phase2.urdf.issues"
 # 训练可行性风险等级。
-STATE_P2_URDF_RISK = "phase2.urdf.trainability_risk_level"
+STATE_P2_URDF_RISK = "phase2.urdf.risk"
 
 # ------------- 配置域 -------------
 # 当前配置模式：create / revise。
 STATE_P2_CONFIG_MODE = "phase2.config.mode"
 # 当前配置版本序号（纯整数）。
 STATE_P2_CONFIG_VERSION = "phase2.config.version"
-# 当前配置版本标识（如 taili-config-v1）。
-STATE_P2_CONFIG_VERSION_ID = "phase2.config.version_id"
 # 父版本号。
 STATE_P2_CONFIG_PARENT_VERSION = "phase2.config.parent_version"
-# 当前参考机器人名称。
-STATE_P2_CONFIG_REFERENCE = "phase2.config.reference_robot"
 # 历史配置版本列表。
 STATE_P2_CONFIG_HISTORY = "phase2.config.history"
 # 最近一次修改的字段列表。

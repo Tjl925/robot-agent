@@ -26,7 +26,7 @@ class AutoDLConfig(BaseModel):
     """
 
     # AutoDL API 根地址。
-    api_base: str = "https://api.autodl.com"
+    api_base: str = "https://www.autodl.art"
     # 访问 AutoDL 平台所需的 Token。
     token: str
     # 目标 AutoDL 实例 UUID。
@@ -52,11 +52,11 @@ class AutoDLConfig(BaseModel):
     retry_backoff_seconds: int = Field(default=3, ge=0, description="重试退避时长（秒）。")
 
     # Phase-1 的应用名，用于会话标识。
-    app_name: str = "robot_agent_phase1"
+    app_name: str = "agents"
     # Phase-1 的用户标识。
     user_id: str = "local_user"
     # Phase-1 的会话标识。
-    session_id: str = "phase1_session"
+    session_id: str = "agent_session"
 
 
 class TailiCloudConfig(BaseModel):
@@ -70,16 +70,6 @@ class TailiCloudConfig(BaseModel):
     local_robot_root: str = Field(default="taili_quad", description="本地机械狗模型根目录")
     # 本地机器人 URDF 所在子目录。
     local_robots_subdir: str = Field(default="urdf", description="本地机器人 URDF 子目录")
-    # 首次生成时参考的机器人名称。
-    reference_robot_name: str = Field(default="unitree_b2", description="首次生成参考机器人名称")
-    # 固定 unitree 参考模板根目录。
-    reference_template_root: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2", description="固定 unitree_b2 参考模板根目录")
-    # 固定 unitree 资产模板路径。
-    reference_asset_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/assets/unitree.py", description="固定 unitree 资产模板路径")
-    # 固定 unitree 任务注册模板路径。
-    reference_task_init_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/__init__.py", description="固定 unitree_b2 任务注册模板路径")
-    # 固定 unitree 任务配置模板路径。
-    reference_task_cfg_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/rough_env_cfg.py", description="固定 unitree_b2 任务配置模板路径")
     # 云端 robot_lab 根目录（固定路径）。
     cloud_robot_lab_root: str = Field(default="/root/robot_lab", description="云端 robot_lab 根目录（固定路径）")
     # 云端资产文件固定落点。
@@ -134,11 +124,11 @@ class TailiCloudConfig(BaseModel):
     eval_early_stop_rules: list[dict] = Field(default_factory=list, description="训练中 early stop 判定规则列表")
 
     # 应用名。
-    app_name: str = "robot_agent_taili"
+    app_name: str = "agents"
     # 用户标识。
     user_id: str = "local_user"
     # 会话标识。
-    session_id: str = "taili_session"
+    session_id: str = "agent_session"
 
 
 class TailiUrdfAnalysisResult(BaseModel):
@@ -152,12 +142,8 @@ class TailiUrdfAnalysisResult(BaseModel):
     valid: bool
     # 风险等级：low / medium / high。
     risk: str
-    # 具体问题列表，尽量可定位。
+    # 具体问题列表，必须使用中文。
     issues: list[str] = Field(default_factory=list)
-    # 简短总结。
-    summary: str = ""
-    # 可执行的下一步建议。
-    recommendation: str = ""
 
 
 class TailiConfigContext(BaseModel):
@@ -169,26 +155,20 @@ class TailiConfigContext(BaseModel):
 
     # 当前模式：create 或 revise。
     mode: str = Field(default="create", description="create / revise")
-    # 当前版本号（字符串标识）。
-    version: str
+    # 当前版本号。
+    version: int
     # 父版本号。
-    parent_version: str | None = None
-    # 参考机器人名称。
-    reference_robot: str | None = None
-    # 参考资产模板路径。
-    reference_asset_path: str | None = None
-    # 参考任务注册模板路径。
-    reference_task_init_path: str | None = None
-    # 参考任务配置模板路径。
-    reference_task_cfg_path: str | None = None
+    parent_version: int | None = None
     # 当前任务目标。
     task_goal: str | None = None
     # 当前 URDF 文件路径。
     urdf_path: str | None = None
-    # 当前 URDF 原文或关键摘要。
+    # 当前 URDF 原文。
     urdf_text: str | None = None
-    # 当前 URDF 分析摘要。
-    urdf_summary: dict = Field(default_factory=dict)
+    # 当前 URDF 风险等级。
+    urdf_risk: str | None = None
+    # 当前 URDF 问题列表。
+    urdf_issues: list[str] = Field(default_factory=list)
     # 当前已经生成过的草案（用于 revise）。
     current_draft: dict | None = None
     # 历史版本列表。
@@ -220,11 +200,9 @@ class TailiConfigDraft(BaseModel):
     # 生成模式：create 或 revise。
     mode: str = Field(default="create", description="create / revise")
     # 当前版本号。
-    version: str = Field(default="taili-config-v1", description="当前版本号")
+    version: int = Field(default=1, description="当前版本号")
     # 父版本号。
-    parent_version: str | None = Field(default=None, description="父版本号")
-    # 参考机器人名称。
-    reference_robot: str | None = Field(default=None, description="参考机器人名")
+    parent_version: int | None = Field(default=None, description="父版本号")
     # 任务名。
     task_name: str
     # 资产代码草案。

@@ -46,9 +46,7 @@ from robot_agent.schemas.state import (
     STATE_P2_CONFIG_LAST_REASON,
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
-    STATE_P2_CONFIG_REFERENCE,
     STATE_P2_CONFIG_VERSION,
-    STATE_P2_CONFIG_VERSION_ID,
     STATE_P2_EVAL_PASSED,
     STATE_P2_EVENTS,
     STATE_P2_FAILURE_REASON,
@@ -137,14 +135,12 @@ class TailiOrchestratorAgent(BaseAgent):
             {
                 "version": int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)),
                 "mode": ctx.session.state.get(STATE_P2_CONFIG_MODE, "create"),
-                "reference": ctx.session.state.get(STATE_P2_CONFIG_REFERENCE, "unitree_b2"),
                 "reason": reason,
                 "last_changes": ctx.session.state.get(STATE_P2_CONFIG_LAST_CHANGES, []),
             }
         )
         ctx.session.state[STATE_P2_CONFIG_HISTORY] = history
         ctx.session.state[STATE_P2_CONFIG_VERSION] = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1
-        ctx.session.state[STATE_P2_CONFIG_VERSION_ID] = f"taili-config-v{ctx.session.state[STATE_P2_CONFIG_VERSION]}"
         ctx.session.state[STATE_P2_CONFIG_MODE] = "revise"
         ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = int(ctx.session.state[STATE_P2_CONFIG_VERSION]) - 1
         ctx.session.state[STATE_P2_CONFIG_LAST_REASON] = reason
@@ -175,8 +171,6 @@ class TailiOrchestratorAgent(BaseAgent):
             ctx.session.state[STATE_P2_CONFIG_VERSION] = 0
         if STATE_P2_CONFIG_MODE not in ctx.session.state:
             ctx.session.state[STATE_P2_CONFIG_MODE] = "create"
-        if STATE_P2_CONFIG_REFERENCE not in ctx.session.state:
-            ctx.session.state[STATE_P2_CONFIG_REFERENCE] = self.cfg.reference_robot_name
         if STATE_P2_CONFIG_LAST_CHANGES not in ctx.session.state:
             ctx.session.state[STATE_P2_CONFIG_LAST_CHANGES] = []
         if STATE_P2_CONFIG_LAST_REASON not in ctx.session.state:
@@ -185,21 +179,21 @@ class TailiOrchestratorAgent(BaseAgent):
         await self._commit_state(ctx)
 
         try:
-            # 2. 分析 URDF，得到可训练风险等级。
+            # 1. 分析 URDF，得到可训练风险等级。
             async for event in self._run_step(ctx, self.analyze_urdf):
                 yield event
             yield self._yield_text("taili_orchestrator: [TEST MODE] 仅测试 AnalyzeURDF，已暂停后续流程。")
             return
-            # 3. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
+            # 2. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
             async for event in self._run_step(ctx, self.config_synthesis):
                 yield event
-            # 4. 生成本地草案文件。
+            # 3. 生成本地草案文件。
             async for event in self._run_step(ctx, self.generate_files):
                 yield event
-            # 5. 上传到云端，并准备远端执行。
+            # 4. 上传到云端，并准备远端执行。
             async for event in self._run_step(ctx, self.publish_cloud):
                 yield event
-            # 6. 启动训练任务。
+            # 5. 启动训练任务。
             async for event in self._run_step(ctx, self.train):
                 yield event
             if bool(ctx.session.state.get("phase2.train.should_stop", False)):
@@ -218,14 +212,14 @@ class TailiOrchestratorAgent(BaseAgent):
                     await self._commit_state(ctx)
                     yield self._yield_text("taili_phase2: 训练失败早停，进入修订流程")
             else:
-                # 7. 训练完整结束后播放视频并交给视频裁判。
+                # 6. 训练完整结束后播放视频并交给视频裁判。
                 ctx.session.state[STATE_P2_STAGE] = Phase2Stage.EVALUATE_VIDEO
                 ctx.session.state[STATE_P2_EVAL_VIDEO_PATH] = str(Path(self.cfg.cloud_robot_lab_root) / "videos" / self.cfg.video_output_name)
                 await self._commit_state(ctx)
                 async for event in self._run_step(ctx, self.evaluate_video):
                     yield event
 
-            # 8. 如果没通过，进入 revise 迭代，直到达到最大自动轮数。
+            # 7. 如果没通过，进入 revise 迭代，直到达到最大自动轮数。
             while not bool(ctx.session.state.get(STATE_P2_EVAL_PASSED, False)) and int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)) < int(ctx.session.state.get(STATE_P2_ITER_MAX, self.cfg.max_auto_iterations)):
                 failure_reasons = list(ctx.session.state.get("phase2.eval.gate_failed_reasons", []))
                 reason = "; ".join(str(item) for item in failure_reasons) if failure_reasons else str(ctx.session.state.get(STATE_P2_HITL_REASON, "revise"))
@@ -250,7 +244,7 @@ class TailiOrchestratorAgent(BaseAgent):
                 async for event in self._run_step(ctx, self.evaluate_video):
                     yield event
 
-            # 9. 自动迭代结束后仍不通过，则进入 HITL。
+            # 8. 自动迭代结束后仍不通过，则进入 HITL。
             if not bool(ctx.session.state.get(STATE_P2_EVAL_PASSED, False)):
                 ctx.session.state[STATE_P2_STAGE] = Phase2Stage.WAIT_HUMAN
                 ctx.session.state[STATE_P2_HITL_REQUIRED] = True
@@ -260,7 +254,7 @@ class TailiOrchestratorAgent(BaseAgent):
                 yield self._yield_text("taili_phase2: 达到最大自动迭代轮数，进入 HITL")
                 return
 
-            # 10. 通过后归档输出。
+            # 9. 通过后归档输出。
             async for event in self._run_step(ctx, self.archive_outputs):
                 yield event
 

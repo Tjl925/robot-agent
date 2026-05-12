@@ -46,12 +46,10 @@ from robot_agent.schemas.state import (
     STATE_P2_CONFIG_LAST_REASON,
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
-    STATE_P2_CONFIG_REFERENCE,
     STATE_P2_CONFIG_REWARD,
     STATE_P2_CONFIG_TEMPLATE,
     STATE_P2_CONFIG_TEXT,
     STATE_P2_CONFIG_VERSION,
-    STATE_P2_CONFIG_VERSION_ID,
     STATE_P2_EVAL_CHECK_INTERVAL,
     STATE_P2_EVAL_CHECKPOINT_GLOB,
     STATE_P2_EVAL_CHECKPOINT_PATH,
@@ -155,10 +153,8 @@ class _TailiStepBaseAgent(BaseAgent):
         return metrics
 
 
-
 class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
     cfg: TailiCloudConfig
-    model: str = "gemini-2.5-flash"
     description: str = "Analyzes a URDF and returns a strict JSON diagnosis for training readiness."
     input_schema: ClassVar[Any] = TailiConfigContext
     output_schema: ClassVar[Any] = TailiUrdfAnalysisResult
@@ -168,32 +164,25 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
         "你要重点关注：\n"
         "1. 结构完整性（robot / link / joint / inertial / visual / collision）\n"
         "2. 命名、关节连通性、层级是否合理\n"
-        "3. 是否存在明显会影响训练的风险\n"
-        "4. 给出简短、可执行的推荐动作\n\n"
+        "3. 是否存在明显会影响训练的风险\n\n"
+        "输出的 issues 必须用中文显示，方便人工审核。\n"
         "输出必须符合以下 JSON 结构：\n"
         "{\n"
         '  "valid": boolean,\n'
         '  "risk": "low" | "medium" | "high",\n'
-        '  "issues": [string, ...],\n'
-        '  "summary": string,\n'
-        '  "recommendation": string\n'
+        '  "issues": [string, ...]\n'
         "}\n"
     )
-    output_key: str = "phase2.urdf.analysis"
     model_config = {"arbitrary_types_allowed": True}
 
     def _build_input_payload(self, ctx: InvocationContext, urdf_path: Path, urdf_text: str) -> TailiConfigContext:
         return TailiConfigContext(
             mode=str(ctx.session.state.get(STATE_P2_CONFIG_MODE, "create")),
-            version=str(ctx.session.state.get(STATE_P2_CONFIG_VERSION_ID, f"taili-config-v{int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1}")),
-            reference_robot=str(ctx.session.state.get(STATE_P2_CONFIG_REFERENCE, self.cfg.reference_robot_name)),
-            reference_asset_path=self.cfg.reference_asset_path,
-            reference_task_init_path=self.cfg.reference_task_init_path,
-            reference_task_cfg_path=self.cfg.reference_task_cfg_path,
+            version=int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1,
+            parent_version=ctx.session.state.get(STATE_P2_CONFIG_PARENT_VERSION),
             task_goal="taili_quad 速度控制训练",
             urdf_path=str(urdf_path),
             urdf_text=urdf_text,
-            urdf_summary={"exists": urdf_path.exists(), "size": len(urdf_text)},
             history=list(ctx.session.state.get(STATE_P2_CONFIG_HISTORY, [])),
             failure_reasons=list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, [])),
             failure_summary=str(ctx.session.state.get(STATE_P2_HITL_REASON, "")),
@@ -210,14 +199,12 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
         urdf_path = Path(self.cfg.local_robot_root) / self.cfg.local_robots_subdir / "robot.urdf"
         urdf_text = urdf_path.read_text(encoding="utf-8", errors="replace") if urdf_path.exists() else ""
         input_payload = self._build_input_payload(ctx, urdf_path, urdf_text)
-        ctx.session.state["phase2.urdf.input_payload"] = input_payload.model_dump()
         prompt_text = f"请基于以下完整事实执行你的任务:\n{json.dumps(input_payload.model_dump(), ensure_ascii=False)}"
         result = UnifiedLLMClient().generate_json(
             system_prompt=self.instruction,
             user_prompt=prompt_text,
             schema=TailiUrdfAnalysisResult,
         )
-        ctx.session.state[self.output_key] = result.model_dump()
         ctx.session.state[STATE_P2_URDF_VALID] = result.valid
         ctx.session.state[STATE_P2_URDF_ISSUES] = result.issues
         ctx.session.state[STATE_P2_URDF_RISK] = result.risk
@@ -237,9 +224,8 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
         "输出必须符合如下 JSON 结构：\n"
         "{\n"
         '  "mode": "create" | "revise",\n'
-        '  "version": string,\n'
-        '  "parent_version": string | null,\n'
-        '  "reference_robot": string | null,\n'
+        '  "version": integer,\n'
+        '  "parent_version": integer | null,\n'
         '  "task_name": string,\n'
         '  "asset_code": string,\n'
         '  "task_init_code": string,\n'
@@ -260,21 +246,16 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
         mode = str(ctx.session.state.get(STATE_P2_CONFIG_MODE, "create"))
         risk = str(ctx.session.state.get(STATE_P2_URDF_RISK, "medium"))
         version_index = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0))
-        version_id = f"taili-config-v{version_index + 1}"
-        reference_robot = ctx.session.state.get(STATE_P2_CONFIG_REFERENCE, self.cfg.reference_robot_name)
         history = list(ctx.session.state.get(STATE_P2_CONFIG_HISTORY, []))
         return TailiConfigContext(
             mode=mode,
-            version=version_id,
+            version=version_index + 1,
             parent_version=ctx.session.state.get(STATE_P2_CONFIG_PARENT_VERSION),
-            reference_robot=reference_robot,
-            reference_asset_path=self.cfg.reference_asset_path,
-            reference_task_init_path=self.cfg.reference_task_init_path,
-            reference_task_cfg_path=self.cfg.reference_task_cfg_path,
             task_goal="taili_quad 速度控制训练",
             urdf_path=str(Path(self.cfg.local_robot_root) / self.cfg.local_robots_subdir / "robot.urdf"),
             urdf_text=Path(self.cfg.local_robot_root, self.cfg.local_robots_subdir, "robot.urdf").read_text(encoding="utf-8", errors="replace") if Path(self.cfg.local_robot_root, self.cfg.local_robots_subdir, "robot.urdf").exists() else None,
-            urdf_summary={"valid": ctx.session.state.get(STATE_P2_URDF_VALID), "issues": ctx.session.state.get(STATE_P2_URDF_ISSUES, []), "risk": risk},
+            urdf_risk=risk,
+            urdf_issues=ctx.session.state.get(STATE_P2_URDF_ISSUES, []),
             current_draft=history[-1] if history else None,
             history=history,
             failure_reasons=list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, [])),
@@ -292,9 +273,9 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             "mode": context.mode,
             "version": context.version,
             "parent_version": context.parent_version,
-            "reference_robot": context.reference_robot,
             "task_goal": context.task_goal,
-            "urdf_summary": context.urdf_summary,
+            "urdf_risk": context.urdf_risk,
+            "urdf_issues": context.urdf_issues,
             "failure_reasons": context.failure_reasons,
             "failure_summary": context.failure_summary,
             "iteration_round": context.iteration_round,
@@ -306,9 +287,10 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             "current_draft": context.current_draft,
             "history": context.history[-3:],
             "reference_templates": {
-                "asset": self.cfg.reference_asset_path,
-                "task_init": self.cfg.reference_task_init_path,
-                "task_cfg": self.cfg.reference_task_cfg_path,
+                "asset": "reference/robot_lab/assets/unitree.py",
+                "task_init": "reference/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/__init__.py",
+                "task_cfg": "reference/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/rough_env_cfg.py",
+                "agents": "reference/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/agents"
             },
         }
 
@@ -330,11 +312,7 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
         ctx.session.state[STATE_P2_CONFIG_HYPERPARAMS] = draft.hyperparams
         ctx.session.state[STATE_P2_CONFIG_TEXT] = draft.model_dump_json(indent=2)
         ctx.session.state[STATE_P2_CONFIG_MODE] = draft.mode
-        # 版本号由编排器的 _append_config_revision 统一管理，此处只读取使用，不再递增。
-        current_version = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 1))
-        ctx.session.state[STATE_P2_CONFIG_VERSION_ID] = f"taili-config-v{current_version}"
         ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = draft.parent_version
-        ctx.session.state[STATE_P2_CONFIG_REFERENCE] = draft.reference_robot
         self._add_log(ctx, f"[{self.name}] 配置生成完成 mode={draft.mode} version={draft.version}")
         yield self._yield_text(draft.model_dump_json(indent=2))
 

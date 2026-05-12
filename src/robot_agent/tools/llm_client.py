@@ -44,24 +44,16 @@ class UnifiedLLMClient:
         schema_name = schema.__name__
         for _ in range(max(1, self.config.max_retries + 1)):
             try:
-                response = client.responses.create(
+                response = client.chat.completions.create(
                     model=self.config.model,
-                    input=[
+                    messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=self.config.temperature,
-                    text={"format": {"type": "json_object"}},
+                    response_format={"type": "json_object"},
                 )
-                text = getattr(response, "output_text", None)
-                if not text:
-                    output = getattr(response, "output", None)
-                    text = ""
-                    if output:
-                        try:
-                            text = json.dumps(output, ensure_ascii=False)
-                        except Exception:
-                            text = str(output)
+                text = response.choices[0].message.content or "{}"
                 return schema.model_validate_json(text)
             except Exception as exc:
                 last_error = exc

@@ -9,11 +9,6 @@
   },
   "phase2": {
     "local_robot_root": "taili_quad",
-    "reference_robot_name": "unitree_b2",
-    "reference_template_root": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2",
-    "reference_asset_path": "/root/robot_lab/source/robot_lab/robot_lab/assets/unitree.py",
-    "reference_task_init_path": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/__init__.py",
-    "reference_task_cfg_path": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/rough_env_cfg.py",
     "cloud_robot_lab_root": "/root/robot_lab",
     "cloud_asset_path": "/root/robot_lab/source/robot_lab/robot_lab/assets/taili_quad.py",
     "cloud_task_init_path": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad/__init__.py",
