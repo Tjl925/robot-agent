@@ -1,0 +1,51 @@
+{
+  "phase1": {
+    "api_base": "https://www.autodl.art",
+    "token": "your-autodl-token-here",
+    "instance_uuid": "pro-77486d141fd0",
+    "app_name": "robot_agent_phase1",
+    "user_id": "local_user",
+    "session_id": "phase1_session"
+  },
+  "phase2": {
+    "local_robot_root": "taili_quad",
+    "reference_robot_name": "unitree_b2",
+    "reference_template_root": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2",
+    "reference_asset_path": "/root/robot_lab/source/robot_lab/robot_lab/assets/unitree.py",
+    "reference_task_init_path": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/__init__.py",
+    "reference_task_cfg_path": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/rough_env_cfg.py",
+    "cloud_robot_lab_root": "/root/robot_lab",
+    "cloud_asset_path": "/root/robot_lab/source/robot_lab/robot_lab/assets/taili_quad.py",
+    "cloud_task_init_path": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad/__init__.py",
+    "cloud_task_cfg_root": "/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad",
+    "remote_timeout_seconds": 60,
+    "task_name": "RobotLab-Isaac-Velocity-Rough-Taili-Quad-v0",
+    "train_command_template": "cd /root/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless",
+    "play_command_template": "cd /root/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video",
+    "play_num_envs": null,
+    "eval_log_root": "/root/robot_lab/logs/rsl_rl",
+    "max_training_iterations": 1000,
+    "eval_check_interval": 100,
+    "checkpoint_glob": "model_*.pt",
+    "video_output_name": "eval.mp4",
+    "max_auto_iterations": 2,
+    "success_threshold": 0.75,
+    "max_training_minutes": 60,
+    "hitl_response_text": null,
+    "eval_metric_specs": [
+      {"name": "reward", "direction": "up", "importance": 1},
+      {"name": "policy_loss", "direction": "down", "importance": 1},
+      {"name": "value_loss", "direction": "down", "importance": 1},
+      {"name": "entropy", "direction": "stable_or_down", "importance": 1},
+      {"name": "success_rate", "direction": "up", "importance": 1}
+    ],
+    "eval_early_stop_rules": [
+      {"name": "nan_or_inf", "condition": "logs contain nan/inf", "action": "early_stop"},
+      {"name": "divergence", "condition": "loss diverges or explodes", "action": "early_stop"},
+      {"name": "stagnation", "condition": "metrics stall far below expectation for multiple checks", "action": "early_stop"}
+    ],
+    "app_name": "robot_agent_taili",
+    "user_id": "local_user",
+    "session_id": "taili_session"
+  }
+}
