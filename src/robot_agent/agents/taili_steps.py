@@ -73,9 +73,6 @@ from robot_agent.schemas.state import (
     STATE_P2_ITER_ROUND,
     STATE_P2_STAGE,
     STATE_P2_STATUS,
-    STATE_P2_TASK_GOAL,
-    STATE_P2_TASK_ID,
-    STATE_P2_TASK_URDF_PATH,
     STATE_P2_TRAIN_COMMAND,
     STATE_P2_TRAIN_EARLY_STOPPED,
     STATE_P2_TRAIN_RUN_ID,
@@ -158,16 +155,6 @@ class _TailiStepBaseAgent(BaseAgent):
         return metrics
 
 
-class IntakeTailiTaskStepAgent(_TailiStepBaseAgent):
-    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        ctx.session.state[STATE_P2_STAGE] = Phase2Stage.INTAKE_TASK
-        ctx.session.state[STATE_P2_STATUS] = "running"
-        ctx.session.state[STATE_P2_TASK_ID] = f"taili-{self.cfg.session_id}"
-        ctx.session.state[STATE_P2_TASK_URDF_PATH] = str(Path(self.cfg.local_robot_root) / self.cfg.local_robots_subdir / "robot.urdf")
-        ctx.session.state[STATE_P2_TASK_GOAL] = "taili_quad 速度控制训练"
-        self._add_log(ctx, f"[{self.name}] 任务接入完成")
-        yield self._yield_text(f"{self.name}: 任务输入已写入")
-
 
 class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
     cfg: TailiCloudConfig
@@ -203,7 +190,7 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
             reference_asset_path=self.cfg.reference_asset_path,
             reference_task_init_path=self.cfg.reference_task_init_path,
             reference_task_cfg_path=self.cfg.reference_task_cfg_path,
-            task_goal=str(ctx.session.state.get(STATE_P2_TASK_GOAL, "taili_quad 速度控制训练")),
+            task_goal="taili_quad 速度控制训练",
             urdf_path=str(urdf_path),
             urdf_text=urdf_text,
             urdf_summary={"exists": urdf_path.exists(), "size": len(urdf_text)},
@@ -220,7 +207,7 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.ANALYZE_URDF
-        urdf_path = Path(str(ctx.session.state[STATE_P2_TASK_URDF_PATH]))
+        urdf_path = Path(self.cfg.local_robot_root) / self.cfg.local_robots_subdir / "robot.urdf"
         urdf_text = urdf_path.read_text(encoding="utf-8", errors="replace") if urdf_path.exists() else ""
         input_payload = self._build_input_payload(ctx, urdf_path, urdf_text)
         ctx.session.state["phase2.urdf.input_payload"] = input_payload.model_dump()
@@ -284,9 +271,9 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             reference_asset_path=self.cfg.reference_asset_path,
             reference_task_init_path=self.cfg.reference_task_init_path,
             reference_task_cfg_path=self.cfg.reference_task_cfg_path,
-            task_goal=str(ctx.session.state.get(STATE_P2_TASK_GOAL, "taili_quad 速度控制训练")),
-            urdf_path=str(ctx.session.state.get(STATE_P2_TASK_URDF_PATH, "")),
-            urdf_text=Path(str(ctx.session.state.get(STATE_P2_TASK_URDF_PATH, ""))).read_text(encoding="utf-8", errors="replace") if Path(str(ctx.session.state.get(STATE_P2_TASK_URDF_PATH, ""))).exists() else None,
+            task_goal="taili_quad 速度控制训练",
+            urdf_path=str(Path(self.cfg.local_robot_root) / self.cfg.local_robots_subdir / "robot.urdf"),
+            urdf_text=Path(self.cfg.local_robot_root, self.cfg.local_robots_subdir, "robot.urdf").read_text(encoding="utf-8", errors="replace") if Path(self.cfg.local_robot_root, self.cfg.local_robots_subdir, "robot.urdf").exists() else None,
             urdf_summary={"valid": ctx.session.state.get(STATE_P2_URDF_VALID), "issues": ctx.session.state.get(STATE_P2_URDF_ISSUES, []), "risk": risk},
             current_draft=history[-1] if history else None,
             history=history,
@@ -386,7 +373,7 @@ class GenerateTailiFilesStepAgent(_TailiStepBaseAgent):
 class PublishTailiWorkspaceStepAgent(_TailiStepBaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.PUBLISH_TO_CLOUD
-        ctx.session.state[STATE_P2_TRAIN_RUN_ID] = f"taili-run-{ctx.session.state.get(STATE_P2_TASK_ID)}-r{ctx.session.state.get(STATE_P2_ITER_ROUND, 0)}"
+        ctx.session.state[STATE_P2_TRAIN_RUN_ID] = f"taili-run-taili-{self.cfg.session_id}-r{ctx.session.state.get(STATE_P2_ITER_ROUND, 0)}"
         ctx.session.state[STATE_P2_TRAIN_COMMAND] = self.cfg.train_command_template.format(task_name=self.cfg.task_name)
         ctx.session.state[STATE_P2_TRAIN_STATUS] = "published"
 
@@ -706,7 +693,7 @@ class ArchiveTailiOutputsStepAgent(_TailiStepBaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.ARCHIVE_OUTPUTS
         summary = {
-            "task_id": ctx.session.state.get(STATE_P2_TASK_ID),
+            "task_id": f"taili-{self.cfg.session_id}",
             "task_name": self.cfg.task_name,
             "cloud_asset_path": self.cfg.cloud_asset_path,
             "cloud_task_root": self.cfg.cloud_task_cfg_root,

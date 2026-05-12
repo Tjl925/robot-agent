@@ -1,11 +1,11 @@
 {
   "phase1": {
     "api_base": "https://www.autodl.art",
-    "token": "your-autodl-token-here",
+    "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjYzMTk5MCwidXVpZCI6IjdkMWJiN2RkLWMzNzMtNDE2ZC1iNTE5LTQ5YmUyOGY5ZTRhNCIsInRlbmFudCI6ImF1dG9kbCJ9.nMLpUt4y93XtF8q2Bo1gFPvWqs_QbP2fZp0OpQmERZQar62pf-JXycMsOOpFbGu0ZZuUtgHhG8qnCmm1adW_1A",
     "instance_uuid": "pro-77486d141fd0",
-    "app_name": "robot_agent_phase1",
+    "app_name": "agents",
     "user_id": "local_user",
-    "session_id": "phase1_session"
+    "session_id": "agent_session"
   },
   "phase2": {
     "local_robot_root": "taili_quad",
@@ -33,19 +33,51 @@
     "max_training_minutes": 60,
     "hitl_response_text": null,
     "eval_metric_specs": [
-      {"name": "reward", "direction": "up", "importance": 1},
-      {"name": "policy_loss", "direction": "down", "importance": 1},
-      {"name": "value_loss", "direction": "down", "importance": 1},
-      {"name": "entropy", "direction": "stable_or_down", "importance": 1},
-      {"name": "success_rate", "direction": "up", "importance": 1}
+      {
+        "name": "reward",
+        "direction": "up",
+        "importance": 1
+      },
+      {
+        "name": "policy_loss",
+        "direction": "down",
+        "importance": 1
+      },
+      {
+        "name": "value_loss",
+        "direction": "down",
+        "importance": 1
+      },
+      {
+        "name": "entropy",
+        "direction": "stable_or_down",
+        "importance": 1
+      },
+      {
+        "name": "success_rate",
+        "direction": "up",
+        "importance": 1
+      }
     ],
     "eval_early_stop_rules": [
-      {"name": "nan_or_inf", "condition": "logs contain nan/inf", "action": "early_stop"},
-      {"name": "divergence", "condition": "loss diverges or explodes", "action": "early_stop"},
-      {"name": "stagnation", "condition": "metrics stall far below expectation for multiple checks", "action": "early_stop"}
+      {
+        "name": "nan_or_inf",
+        "condition": "logs contain nan/inf",
+        "action": "early_stop"
+      },
+      {
+        "name": "divergence",
+        "condition": "loss diverges or explodes",
+        "action": "early_stop"
+      },
+      {
+        "name": "stagnation",
+        "condition": "metrics stall far below expectation for multiple checks",
+        "action": "early_stop"
+      }
     ],
-    "app_name": "robot_agent_taili",
+    "app_name": "agents",
     "user_id": "local_user",
-    "session_id": "taili_session"
+    "session_id": "agent_session"
   }
 }

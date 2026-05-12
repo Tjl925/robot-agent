@@ -44,8 +44,6 @@ class Phase2Stage(str, Enum):
 
     # 尚未进入 Phase-2。
     INIT = "init"
-    # 接收任务输入。
-    INTAKE_TASK = "intake_task"
     # 分析 URDF 结构。
     ANALYZE_URDF = "analyze_urdf"
     # 生成或修订配置。
@@ -114,16 +112,6 @@ STATE_P2_STATUS = "phase2.status"
 STATE_P2_FAILURE_REASON = "phase2.failure_reason"
 # Phase-2 执行日志列表。
 STATE_P2_EVENTS = "phase2.events"
-
-# ------------- 输入任务域 -------------
-# 任务 ID。
-STATE_P2_TASK_ID = "phase2.task.id"
-# 本地 URDF 文件路径。
-STATE_P2_TASK_URDF_PATH = "phase2.task.urdf_path"
-# 用户输入的任务目标。
-STATE_P2_TASK_GOAL = "phase2.task.user_goal"
-# 任务约束列表。
-STATE_P2_TASK_CONSTRAINTS = "phase2.task.constraints"
 
 # ------------- URDF 分析域 -------------
 # URDF 是否有效。

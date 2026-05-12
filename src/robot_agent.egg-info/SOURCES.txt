@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 src/robot_agent/__init__.py
 src/robot_agent.egg-info/PKG-INFO
@@ -7,9 +8,15 @@ src/robot_agent.egg-info/requires.txt
 src/robot_agent.egg-info/top_level.txt
 src/robot_agent/agents/__init__.py
 src/robot_agent/agents/orchestrator.py
+src/robot_agent/agents/phase1_orchestrator.py
 src/robot_agent/agents/phase1_steps.py
+src/robot_agent/agents/taili_orchestrator.py
+src/robot_agent/agents/taili_steps.py
+src/robot_agent/schemas/__init__.py
 src/robot_agent/schemas/config.py
 src/robot_agent/schemas/state.py
 src/robot_agent/tools/__init__.py
 src/robot_agent/tools/autodl_api.py
+src/robot_agent/tools/llm_client.py
 src/robot_agent/tools/ssh_client.py
+src/robot_agent/tools/taili_cloud.py

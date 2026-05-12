@@ -33,7 +33,6 @@ from robot_agent.agents.taili_steps import (
     EvaluateTailiTrainingLogAgent,
     EvaluateTailiVideoAgent,
     GenerateTailiFilesStepAgent,
-    IntakeTailiTaskStepAgent,
     PublishTailiWorkspaceStepAgent,
     RepairTailiWorkflowStepAgent,
     TailiConfigSynthesisAgent,
@@ -73,7 +72,6 @@ class TailiOrchestratorAgent(BaseAgent):
     """
 
     cfg: TailiCloudConfig
-    intake_task: IntakeTailiTaskStepAgent
     analyze_urdf: AnalyzeTailiUrdfStepAgent
     config_synthesis: TailiConfigSynthesisAgent
     generate_files: GenerateTailiFilesStepAgent
@@ -87,7 +85,6 @@ class TailiOrchestratorAgent(BaseAgent):
 
     def __init__(self, cfg: TailiCloudConfig):
         # 子 Agent 的构造集中在编排器里，避免外部调用时需要手动组装整条链路。
-        intake_task = IntakeTailiTaskStepAgent(name="taili_intake_task", cfg=cfg)
         analyze_urdf = AnalyzeTailiUrdfStepAgent(name="taili_analyze_urdf", cfg=cfg)
         config_synthesis = TailiConfigSynthesisAgent(name="taili_config_synthesis", cfg=cfg)
         generate_files = GenerateTailiFilesStepAgent(name="taili_generate_files", cfg=cfg)
@@ -100,7 +97,6 @@ class TailiOrchestratorAgent(BaseAgent):
         super().__init__(
             name="taili_orchestrator",
             cfg=cfg,
-            intake_task=intake_task,
             analyze_urdf=analyze_urdf,
             config_synthesis=config_synthesis,
             generate_files=generate_files,
@@ -111,7 +107,6 @@ class TailiOrchestratorAgent(BaseAgent):
             repair=repair,
             archive_outputs=archive_outputs,
             sub_agents=[
-                intake_task,
                 analyze_urdf,
                 config_synthesis,
                 generate_files,
@@ -190,12 +185,11 @@ class TailiOrchestratorAgent(BaseAgent):
         await self._commit_state(ctx)
 
         try:
-            # 1. 接入任务输入，写入任务 ID / URDF 路径 / 目标描述。
-            async for event in self._run_step(ctx, self.intake_task):
-                yield event
             # 2. 分析 URDF，得到可训练风险等级。
             async for event in self._run_step(ctx, self.analyze_urdf):
                 yield event
+            yield self._yield_text("taili_orchestrator: [TEST MODE] 仅测试 AnalyzeURDF，已暂停后续流程。")
+            return
             # 3. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
             async for event in self._run_step(ctx, self.config_synthesis):
                 yield event
