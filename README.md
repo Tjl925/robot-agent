@@ -86,13 +86,13 @@ Phase 2 负责 Taili 到 robot_lab 的闭环：
 负责读取本地 URDF 和上下文，输出 `TailiUrdfAnalysisResult`，用于判断机器人结构是否适合进入后续配置和训练闭环。
 
 ### `TailiConfigSynthesisAgent`
-负责在 `create / revise` 模式下生成 `TailiConfigDraft`，包含资产代码、任务配置、reward、hyperparams 和修订说明。
+负责在 `create / revise` 模式下生成 `TailiConfigDraft`。已接入大模型思维链流式实时输出机制（Streaming），在 `revise` 模式下不再依赖超大的历史状态键，而是直接扫描读取本地磁盘上实际生成的旧代码，极大优化了 Token 消耗和生成质量。
 
 ### `GenerateTailiFilesStepAgent`
 负责在本地生成发布文件，不做云端同步。
 
 ### `PublishTailiWorkspaceStepAgent`
-负责把本地生成物和 URDF 同步到云端 `robot_lab`，并准备后续训练执行。
+负责把本地生成物、全量机器人模型资产（递归扫描 `urdf/`、`meshes/` 等并自动建树）同步到云端 `robot_lab`，并准备后续训练执行。
 
 ### `TrainTailiStepAgent`
 负责启动训练、按固定间隔轮询训练日志、从新增日志中提取最新完整 checkpoint 块，并在日志评估 agent 建议 early stop 时立刻终止训练。

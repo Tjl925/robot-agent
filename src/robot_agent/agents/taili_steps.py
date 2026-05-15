@@ -80,19 +80,14 @@ from robot_agent.schemas.state import (
 from robot_agent.tools.llm_client import UnifiedLLMClient
 from robot_agent.tools.ssh_client import execute_ssh_command
 from robot_agent.tools.taili_cloud import (
-    render_taili_asset_py,
-    render_taili_task_cfg_py,
-    render_taili_task_init_py,
     download_remote_file_to_temp,
     fetch_remote_file,
-    remote_find_latest_matching_file,
     remote_find_latest_video_file,
     remote_kill_process,
     remote_list_latest_run,
     remote_tail_log,
     remote_upload_taili_workspace,
     start_remote_training,
-    sync_local_tree_to_cloud,
     wait_for_remote_file_stable,
 )
 
@@ -184,10 +179,6 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
             failure_summary=str(ctx.session.state.get(STATE_P2_HITL_REASON, "")),
             iteration_round=int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)),
             max_iterations=int(ctx.session.state.get("phase2.train.max_iterations", self.cfg.max_training_iterations)),
-            cloud_asset_path=self.cfg.cloud_asset_path,
-            cloud_task_init_path=self.cfg.cloud_task_init_path,
-            cloud_task_cfg_root=self.cfg.cloud_task_cfg_root,
-            cloud_data_root=f"{self.cfg.cloud_robot_lab_root}/source/robot_lab/data/Robots",
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -383,45 +374,20 @@ class GenerateTailiFilesStepAgent(_TailiStepBaseAgent):
 class PublishTailiWorkspaceStepAgent(_TailiStepBaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.PUBLISH_TO_CLOUD
-        ctx.session.state[STATE_P2_TRAIN_RUN_ID] = f"taili-run-taili-{self.cfg.session_id}-r{ctx.session.state.get(STATE_P2_ITER_ROUND, 0)}"
-        ctx.session.state[STATE_P2_TRAIN_COMMAND] = self.cfg.train_command_template.format(task_name=self.cfg.task_name)
-        ctx.session.state[STATE_P2_TRAIN_STATUS] = "published"
 
-        copied = sync_local_tree_to_cloud(
-            local_root=self.cfg.local_robot_root,
-            cloud_root=self.cfg.cloud_robot_lab_root,
-            files=[
-                (f"{self.cfg.local_robots_subdir}/robot.urdf", "source/robot_lab/robot_lab/data/Robots/robot.urdf"),
-                (".taili_generated/taili_quad.py", self.cfg.cloud_asset_path.replace(self.cfg.cloud_robot_lab_root + "/", "")),
-                (".taili_generated/agents/__init__.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/agents/__init__.py"),
-                (".taili_generated/agents/rsl_rl_ppo_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/agents/rsl_rl_ppo_cfg.py"),
-                (".taili_generated/__init__.py", self.cfg.cloud_task_init_path.replace(self.cfg.cloud_robot_lab_root + "/", "")),
-                (".taili_generated/flat_env_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/flat_env_cfg.py"),
-                (".taili_generated/rough_env_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/rough_env_cfg.py"),
-            ],
-        )
         uploaded = remote_upload_taili_workspace(
             host=self.cfg.remote_host,
             port=self.cfg.remote_port,
             user=self.cfg.remote_user,
             password=self.cfg.remote_password,
             local_root=self.cfg.local_robot_root,
-            local_robots_subdir=self.cfg.local_robots_subdir,
+            cloud_root=self.cfg.cloud_robot_lab_root,
             cloud_asset_path=self.cfg.cloud_asset_path,
-            cloud_task_init_path=self.cfg.cloud_task_init_path,
             cloud_task_cfg_root=self.cfg.cloud_task_cfg_root,
             timeout_seconds=self.cfg.remote_timeout_seconds,
         )
-        ctx.session.state["phase2.publish.summary"] = {
-            "copied": copied,
-            "uploaded": uploaded,
-            "cloud_root": self.cfg.cloud_robot_lab_root,
-            "asset_path": self.cfg.cloud_asset_path,
-            "task_init_path": self.cfg.cloud_task_init_path,
-            "task_cfg_root": self.cfg.cloud_task_cfg_root,
-        }
-        self._add_log(ctx, f"[{self.name}] 远端发布完成: copied={copied}, uploaded={uploaded}")
-        yield self._yield_text(f"{self.name}: 云端发布完成，准备验证")
+        self._add_log(ctx, f"[{self.name}] 远端发布完成: uploaded {len(uploaded)} files")
+        yield self._yield_text(f"{self.name}: 云端发布完成，准备训练")
 
 class TrainTailiStepAgent(_TailiStepBaseAgent):
     evaluate_training_log: EvaluateTailiTrainingLogAgent | None = None

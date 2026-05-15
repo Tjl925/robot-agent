@@ -74,8 +74,6 @@ class TailiCloudConfig(BaseModel):
     cloud_robot_lab_root: str = Field(default="/root/robot_lab", description="云端 robot_lab 根目录（固定路径）")
     # 云端资产文件固定落点。
     cloud_asset_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/assets/taili_quad.py", description="云端资产文件固定落点")
-    # 云端任务注册文件固定落点。
-    cloud_task_init_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad/__init__.py", description="云端任务注册文件固定落点")
     # 云端任务目录固定落点。
     cloud_task_cfg_root: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad", description="云端任务目录固定落点")
 

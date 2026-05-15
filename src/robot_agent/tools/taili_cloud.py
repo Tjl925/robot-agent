@@ -24,34 +24,6 @@ class TailiCloudToolError(RuntimeError):
     """Taili 云端工具失败时抛出。"""
 
 
-def sync_local_tree_to_cloud(local_root: str, cloud_root: str, files: list[tuple[str, str]]) -> list[dict[str, str]]:
-    """把本地生成文件复制到云端镜像目录（本地模拟同步结果）。
-
-    注意：当 cloud_root 是远端路径（如 /root/robot_lab）且本地不存在时，
-    此函数会跳过复制并返回空列表。真正的文件同步由 SFTP 上传完成。
-    """
-
-    cloud_root_path = Path(cloud_root)
-    if not cloud_root_path.is_absolute() or not cloud_root_path.anchor:
-        return []
-    # 远端路径（如 /root/...）在 Windows 上无法映射，安全跳过。
-    try:
-        cloud_root_path.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return []
-
-    copied: list[dict[str, str]] = []
-    for src_rel, dst_rel in files:
-        src = Path(local_root) / src_rel
-        dst = cloud_root_path / dst_rel
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            copied.append({"src": str(src), "dst": str(dst), "status": "copied"})
-        except OSError as exc:
-            copied.append({"src": str(src), "dst": str(dst), "status": f"skipped: {exc}"})
-    return copied
-
 
 def upload_files_via_sftp(host: str, port: int, user: str, password: str, files: list[tuple[str, str]], timeout_seconds: int) -> list[dict[str, str]]:
     """通过 SFTP 上传文件到远端固定路径。"""
@@ -77,91 +49,47 @@ def upload_files_via_sftp(host: str, port: int, user: str, password: str, files:
     return uploaded
 
 
-def remote_upload_taili_workspace(host: str, port: int, user: str, password: str, local_root: str, local_robots_subdir: str, cloud_asset_path: str, cloud_task_init_path: str, cloud_task_cfg_root: str, timeout_seconds: int) -> list[dict[str, str]]:
-    """把 taili 本地 workspace 关键产物上传到远端固定 robot_lab 路径。"""
+def remote_upload_taili_workspace(
+    host: str, port: int, user: str, password: str, 
+    local_root: str, 
+    cloud_root: str,
+    cloud_asset_path: str, cloud_task_cfg_root: str, 
+    timeout_seconds: int
+) -> list[dict[str, str]]:
+    """把 taili 本地 workspace 关键产物（包括 urdf/meshes 目录和 6 个生成的 Python 文件）上传到远端固定路径。"""
 
-    files = [
-        (str(Path(local_root) / local_robots_subdir / "robot.urdf"), "source/robot_lab/robot_lab/data/Robots/robot.urdf"),
-        (str(Path(local_root) / ".taili_generated" / "taili_quad.py"), cloud_asset_path),
-        (str(Path(local_root) / ".taili_generated" / "__init__.py"), cloud_task_init_path),
-        (str(Path(local_root) / ".taili_generated" / "rough_env_cfg.py"), posixpath.join(cloud_task_cfg_root, "rough_env_cfg.py")),
-    ]
+    files = []
+    
+    # 1. 递归扫描本地模型文件夹 (urdf/, meshes/ 等)
+    local_base = Path(local_root)
+    cloud_model_dir = posixpath.join(cloud_root, "source/robot_lab/data/Robots/taili_quad")
+    
+    if local_base.exists():
+        for p in local_base.rglob("*"):
+            if p.is_file() and ".taili_generated" not in p.parts:
+                rel_path = p.relative_to(local_base)
+                dst = posixpath.join(cloud_model_dir, rel_path.as_posix())
+                files.append((str(p), dst))
+                
+    # 2. 生成的 6 个 Python 文件
+    gen_dir = Path(local_root) / ".taili_generated"
+    config_files = {
+        "taili_quad.py": posixpath.join(cloud_root, cloud_asset_path),
+        "agents/__init__.py": posixpath.join(cloud_root, cloud_task_cfg_root, "agents/__init__.py"),
+        "agents/rsl_rl_ppo_cfg.py": posixpath.join(cloud_root, cloud_task_cfg_root, "agents/rsl_rl_ppo_cfg.py"),
+        "__init__.py": posixpath.join(cloud_root, cloud_task_cfg_root, "__init__.py"),
+        "flat_env_cfg.py": posixpath.join(cloud_root, cloud_task_cfg_root, "flat_env_cfg.py"),
+        "rough_env_cfg.py": posixpath.join(cloud_root, cloud_task_cfg_root, "rough_env_cfg.py"),
+    }
+    
+    for rel_src, dst in config_files.items():
+        src = gen_dir / rel_src
+        if src.exists():
+            files.append((str(src), dst))
+            
     return upload_files_via_sftp(host, port, user, password, files, timeout_seconds)
 
 
-def render_taili_asset_py(local_robot_root: str, task_name: str) -> str:
-    """生成 Taili 资产 Python 草案。
-
-    注意 (P2-5)：生成的代码中 `from isaaclab_assets import ArticulationCfg` 等
-    import 路径为占位模板，需确保与实际 robot_lab 环境的 API 一致。
-    如果 robot_lab 的 API 发生变更，此模板也需同步更新。
-    """
-
-    urdf_path = Path(local_robot_root) / "urdf" / "robot.urdf"
-    return f'''from __future__ import annotations
-
-"""Taili Quad 机器人资产定义。"""
-
-from isaaclab_assets import ArticulationCfg
-from isaaclab_assets.robots import URDF
-
-TAILI_QUAD_CFG = ArticulationCfg(
-    spawn=URDF(
-        usd_path=r"{urdf_path.as_posix()}",
-    ),
-    soft_joint_pos_limit_factor=0.9,
-)
-'''
-
-
-def render_taili_task_init_py(task_name: str) -> str:
-    """生成 Taili 任务注册初始化文件草案。"""
-
-    return f'''from __future__ import annotations
-
-"""Taili Quad 速度控制任务注册。"""
-
-import gymnasium as gym
-
-from . import agents
-
-gym.register(
-    id="{task_name}",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={{
-        "env_cfg_entry_point": f"{{__name__}}.rough_env_cfg:TailiQuadRoughEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{{agents.__name__}}.rsl_rl_ppo_cfg:TailiQuadRoughPPORunnerCfg",
-    }},
-)
-'''
-
-
-def render_taili_task_cfg_py(task_name: str, reward: dict, hyperparams: dict) -> str:
-    """生成 Taili 任务配置草案。"""
-
-    reward_lines = "\n".join(f"        {k!r}: {v!r}," for k, v in reward.items())
-    hyper_lines = "\n".join(f"    {k!r}: {v!r}," for k, v in hyperparams.items())
-    return f'''from __future__ import annotations
-
-"""Taili Quad Rough 环境配置。"""
-
-from isaaclab.utils import configclass
-
-
-@configclass
-class TailiQuadRoughEnvCfg:
-    """Taili Quad rough 环境占位配置。"""
-
-    def __post_init__(self):
-        self.task_name = {task_name!r}
-        self.rewards = {{
-{reward_lines}
-        }}
-        self.hyperparams = {{
-{hyper_lines}
-        }}
-'''
 
 
 def _mkdir_p_sftp(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
@@ -188,21 +116,6 @@ def remote_list_latest_run(host: str, port: int, user: str, password: str, root:
         "runs = [p for p in root.rglob('*') if p.is_dir() and (p / 'checkpoints').exists()]\n"
         "runs = sorted(runs, key=lambda p: p.stat().st_mtime)\n"
         "print(runs[-1] if runs else '')\n"
-        "PY"
-    )
-    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
-    if code != 0:
-        raise TailiCloudToolError(err or out)
-    return out.strip()
-
-
-def remote_find_latest_matching_file(host: str, port: int, user: str, password: str, root: str, glob_pattern: str, timeout_seconds: int) -> str:
-    cmd = (
-        "python - <<'PY'\n"
-        "from pathlib import Path\n"
-        f"root = Path(r'''{root}''')\n"
-        f"matches = sorted(root.rglob(r'''{glob_pattern}'''), key=lambda p: p.stat().st_mtime)\n"
-        "print(matches[-1] if matches else '')\n"
         "PY"
     )
     out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
@@ -300,16 +213,3 @@ def wait_for_remote_file_stable(host: str, port: int, user: str, password: str, 
     return False
 
 
-def remote_tensorboard_summary(host: str, port: int, user: str, password: str, run_root: str, tb_dir_name: str, timeout_seconds: int) -> str:
-    cmd = (
-        "python - <<'PY'\n"
-        "from pathlib import Path\n"
-        f"root = Path(r'''{run_root}''')\n"
-        f"tb = root / '{tb_dir_name}'\n"
-        "print({'exists': tb.exists(), 'path': str(tb)})\n"
-        "PY"
-    )
-    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
-    if code != 0:
-        raise TailiCloudToolError(err or out)
-    return out.strip()

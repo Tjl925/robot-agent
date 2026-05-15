@@ -11,7 +11,7 @@
 - Phase 1：`src/robot_agent/agents/phase1_orchestrator.py` 负责 AutoDL 自动开机、状态轮询、snapshot 提取、SSH 连通探活
 - Phase 2：`src/robot_agent/agents/taili_orchestrator.py` 负责 Taili 任务接入、URDF 分析、LLM 配置生成、云端同步、训练、日志评估、视频评估、失败后 revise、归档
 - 统一配置：`configs/unified.example.json` 作为唯一配置样例，结构分为 `phase1` / `phase2`
-- 记忆：通过 `phase2.config.history`、`phase2.config.version`、`phase2.config.parent_version`、`phase2.config.last_changes`、`phase2.config.last_reason` 显式保存多轮修订历史
+- 记忆：通过 `phase2.config.history`（现已重构为极其精简的摘要以防 Token 爆炸）、`phase2.config.version`、`phase2.config.parent_version` 等字段保存多轮迭代脉络。在 `revise` 模式下，直接由 Agent 强制读取本地磁盘的最新生成文件，实现了巨量上下文的物理隔离。
 - 参考模板：首次生成固定参考 `unitree_b2` 模板路径
 - 评估：已固定为“训练中按动态间隔检查日志；若异常则 early stop；若全部完成则播放视频并做最终判定”的单一路径
 - Phase 2 发布链路已拆分为“本地生成发布文件”与“云端同步发布”两个步骤，职责更清晰
@@ -107,7 +107,8 @@
 - `instruction` 明确约束职责与输出格式；
 - `output_schema` 强制输出严格 JSON；
 - `input_schema` / 结构化上下文把模型需要看的事实整理清楚；
-- `generate_content_config` 通过较低温度提升稳定性。
+- `generate_content_config` 接入了流式输出 (Streaming) 并激活了 DeepSeek reasoning high-effort 思维链模式，大幅优化了终端用户等待大模型生成的 UI 体验；
+- 解决了早期 `history` 包含巨型生成代码导致的上下文爆炸问题。
 
 为了方便后续维护，我把它们的架构边界进一步收敛成了“输入 / 输出 / 职责 / 兜底”四层说明（已同步到 `README.md`）：
 - `AnalyzeTailiUrdfStepAgent`：只负责 URDF 诊断，不改文件；
@@ -128,9 +129,14 @@
 - `phase2.config.version`
 - `phase2.config.parent_version`
 - `phase2.config.reference_robot`
-- `phase2.config.history`
-- `phase2.config.last_changes`
+- `phase2.config.history` （存储轻量级摘要）
 - `phase2.config.last_reason`
+- **本地磁盘隔离读取**：在 revise 时通过 Agent 直接读取 `.taili_generated/` 真实代码文件，取代了在 State 里堆积超大上下文的历史做法。
+
+### 2.4 测试进度（2026-05-15）
+详见 `TESTING_PROGRESS.md`，目前**已跑通了至“云端发布”环节的所有步骤**。
+- **配置生成**：大模型已能利用本地引用模板，流式输出严谨合规的配置并成功落盘。
+- **全量云端同步**：彻底废除老旧的单文件死板上传，实现了基于本地目录树全量递归扫描、剔除生成物、且能**在云端按原相对结构动态创建目录**（如 `urdf/`、`meshes/` 等）的高级能力。
 
 ---
 

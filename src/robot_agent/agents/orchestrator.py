@@ -68,15 +68,6 @@ class OrchestratorAgent(BaseAgent):
     def _handoff_phase1_to_phase2(self, ctx: InvocationContext) -> None:
         """把 Phase-1 的 SSH 结果写入 Phase-2 可直接消费的状态。"""
 
-        ctx.session.state["phase2.ssh.host"] = ctx.session.state.get(STATE_P1_SSH_HOST)
-        ctx.session.state["phase2.ssh.port"] = ctx.session.state.get(STATE_P1_SSH_PORT)
-        ctx.session.state["phase2.ssh.user"] = ctx.session.state.get(STATE_P1_SSH_USER)
-        ctx.session.state["phase2.ssh.password"] = ctx.session.state.get(STATE_P1_SSH_PASSWORD)
-        ctx.session.state["phase2.ssh.command"] = ctx.session.state.get(STATE_P1_SSH_COMMAND)
-        ctx.session.state["phase2.ssh.connected"] = ctx.session.state.get(STATE_P1_SSH_CONNECTED, False)
-        ctx.session.state["phase2.ssh.source"] = "phase1"
-
-        # 把 Phase-1 的结果同步到 Taili 配置对象，Phase-2 后续直接使用这些值。
         self.phase2.cfg.remote_host = str(ctx.session.state.get(STATE_P1_SSH_HOST, self.phase2.cfg.remote_host or ""))
         self.phase2.cfg.remote_port = int(ctx.session.state.get(STATE_P1_SSH_PORT, self.phase2.cfg.remote_port or 22))
         self.phase2.cfg.remote_user = str(ctx.session.state.get(STATE_P1_SSH_USER, self.phase2.cfg.remote_user or "root"))

@@ -173,31 +173,34 @@ class TailiOrchestratorAgent(BaseAgent):
         await self._commit_state(ctx)
 
         try:
+            # --- [TEST MODE] 跳过前三个步骤，直接测试上传 ---
             # 1. 分析 URDF，得到可训练风险等级。
-            async for event in self._run_step(ctx, self.analyze_urdf):
-                yield event
-                
-            urdf_valid = ctx.session.state.get(STATE_P2_URDF_VALID, False)
-            urdf_risk = ctx.session.state.get(STATE_P2_URDF_RISK, "high")
-            if not urdf_valid or urdf_risk == "high":
-                ctx.session.state[STATE_P2_STATUS] = "failed"
-                ctx.session.state[STATE_P2_FAILURE_REASON] = f"URDF 诊断未通过或风险过高 (valid={urdf_valid}, risk={urdf_risk})，流程中止，请人工介入修复。"
-                yield self._yield_text(f"taili_orchestrator: {ctx.session.state[STATE_P2_FAILURE_REASON]}")
-                await self._commit_state(ctx)
-                return
-
-            # 2. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
-            async for event in self._run_step(ctx, self.config_synthesis):
-                yield event
-            # 3. 生成本地草案文件。
-            async for event in self._run_step(ctx, self.generate_files):
-                yield event
-                
-            yield self._yield_text("taili_orchestrator: [TEST MODE] 测试完成 AnalyzeURDF -> ConfigSynthesis -> GenerateFiles，暂停后续流程。")
-            return
+            # async for event in self._run_step(ctx, self.analyze_urdf):
+            #     yield event
+            #     
+            # urdf_valid = ctx.session.state.get(STATE_P2_URDF_VALID, False)
+            # urdf_risk = ctx.session.state.get(STATE_P2_URDF_RISK, "high")
+            # if not urdf_valid or urdf_risk == "high":
+            #     ctx.session.state[STATE_P2_STATUS] = "failed"
+            #     ctx.session.state[STATE_P2_FAILURE_REASON] = f"URDF 诊断未通过或风险过高 (valid={urdf_valid}, risk={urdf_risk})，流程中止，请人工介入修复。"
+            #     yield self._yield_text(f"taili_orchestrator: {ctx.session.state[STATE_P2_FAILURE_REASON]}")
+            #     await self._commit_state(ctx)
+            #     return
+            #
+            # # 2. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
+            # async for event in self._run_step(ctx, self.config_synthesis):
+            #     yield event
+            # # 3. 生成本地草案文件。
+            # async for event in self._run_step(ctx, self.generate_files):
+            #     yield event
+            # --- [TEST MODE END] ---
+            
             # 4. 上传到云端，并准备远端执行。
             async for event in self._run_step(ctx, self.publish_cloud):
                 yield event
+                
+            yield self._yield_text("taili_orchestrator: [TEST MODE] 仅测试 publish_cloud，已暂停后续流程。")
+            return
             # 5. 启动训练任务。
             async for event in self._run_step(ctx, self.train):
                 yield event
