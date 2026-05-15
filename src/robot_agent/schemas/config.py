@@ -181,14 +181,8 @@ class TailiConfigContext(BaseModel):
     iteration_round: int = 0
     # 允许的最大迭代轮数。
     max_iterations: int = 0
-    # 云端资产路径。
-    cloud_asset_path: str | None = None
-    # 云端任务注册路径。
-    cloud_task_init_path: str | None = None
-    # 云端任务配置目录。
-    cloud_task_cfg_root: str | None = None
-    # 云端机器人数据目录。
-    cloud_data_root: str | None = None
+    # 参考模板文本字典。
+    reference_templates: dict[str, str] = Field(default_factory=dict)
 
 
 class TailiConfigDraft(BaseModel):
@@ -205,24 +199,20 @@ class TailiConfigDraft(BaseModel):
     parent_version: int | None = Field(default=None, description="父版本号")
     # 任务名。
     task_name: str
-    # 资产代码草案。
+    # 修改原因与思考过程。
+    reasoning: str = Field(description="修改原因与思考过程")
+    # 资产代码草案 (asset_code)
     asset_code: str
-    # 任务注册代码草案。
+    # agents/__init__.py
+    agents_init_code: str
+    # agents/rsl_rl_ppo_cfg.py
+    agents_ppo_cfg_code: str
+    # 任务注册代码草案 (__init__.py)
     task_init_code: str
-    # 任务配置代码草案。
-    task_cfg_code: str
-    # reward 配置。
-    reward: dict
-    # 训练超参数。
-    hyperparams: dict
-    # 生成前提假设。
-    assumptions: list[str] = Field(default_factory=list)
-    # 风险标记。
-    risk_flags: list[str] = Field(default_factory=list)
-    # 本轮改动字段。
-    changed_fields: list[str] = Field(default_factory=list)
-    # 本轮修改原因。
-    change_reason: str | None = Field(default=None)
+    # flat_env_cfg.py
+    flat_env_cfg_code: str
+    # rough_env_cfg.py
+    rough_env_cfg_code: str
 
 
 class TailiJudgeResult(BaseModel):

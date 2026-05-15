@@ -42,8 +42,6 @@ from robot_agent.schemas.config import TailiCloudConfig
 from robot_agent.schemas.state import (
     STATE_P2_ARCHIVE_COMPLETED,
     STATE_P2_CONFIG_HISTORY,
-    STATE_P2_CONFIG_LAST_CHANGES,
-    STATE_P2_CONFIG_LAST_REASON,
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
     STATE_P2_CONFIG_VERSION,
@@ -57,6 +55,8 @@ from robot_agent.schemas.state import (
     STATE_P2_ITER_ROUND,
     STATE_P2_STAGE,
     STATE_P2_STATUS,
+    STATE_P2_URDF_VALID,
+    STATE_P2_URDF_RISK,
     Phase2Stage,
 )
 
@@ -136,14 +136,12 @@ class TailiOrchestratorAgent(BaseAgent):
                 "version": int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)),
                 "mode": ctx.session.state.get(STATE_P2_CONFIG_MODE, "create"),
                 "reason": reason,
-                "last_changes": ctx.session.state.get(STATE_P2_CONFIG_LAST_CHANGES, []),
             }
         )
         ctx.session.state[STATE_P2_CONFIG_HISTORY] = history
         ctx.session.state[STATE_P2_CONFIG_VERSION] = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1
         ctx.session.state[STATE_P2_CONFIG_MODE] = "revise"
         ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = int(ctx.session.state[STATE_P2_CONFIG_VERSION]) - 1
-        ctx.session.state[STATE_P2_CONFIG_LAST_REASON] = reason
         await self._commit_state(ctx)
 
     async def _run_step(self, ctx: InvocationContext, step_agent: BaseAgent) -> AsyncGenerator[Event, None]:
@@ -171,10 +169,6 @@ class TailiOrchestratorAgent(BaseAgent):
             ctx.session.state[STATE_P2_CONFIG_VERSION] = 0
         if STATE_P2_CONFIG_MODE not in ctx.session.state:
             ctx.session.state[STATE_P2_CONFIG_MODE] = "create"
-        if STATE_P2_CONFIG_LAST_CHANGES not in ctx.session.state:
-            ctx.session.state[STATE_P2_CONFIG_LAST_CHANGES] = []
-        if STATE_P2_CONFIG_LAST_REASON not in ctx.session.state:
-            ctx.session.state[STATE_P2_CONFIG_LAST_REASON] = ""
 
         await self._commit_state(ctx)
 
@@ -182,14 +176,25 @@ class TailiOrchestratorAgent(BaseAgent):
             # 1. 分析 URDF，得到可训练风险等级。
             async for event in self._run_step(ctx, self.analyze_urdf):
                 yield event
-            yield self._yield_text("taili_orchestrator: [TEST MODE] 仅测试 AnalyzeURDF，已暂停后续流程。")
-            return
+                
+            urdf_valid = ctx.session.state.get(STATE_P2_URDF_VALID, False)
+            urdf_risk = ctx.session.state.get(STATE_P2_URDF_RISK, "high")
+            if not urdf_valid or urdf_risk == "high":
+                ctx.session.state[STATE_P2_STATUS] = "failed"
+                ctx.session.state[STATE_P2_FAILURE_REASON] = f"URDF 诊断未通过或风险过高 (valid={urdf_valid}, risk={urdf_risk})，流程中止，请人工介入修复。"
+                yield self._yield_text(f"taili_orchestrator: {ctx.session.state[STATE_P2_FAILURE_REASON]}")
+                await self._commit_state(ctx)
+                return
+
             # 2. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
             async for event in self._run_step(ctx, self.config_synthesis):
                 yield event
             # 3. 生成本地草案文件。
             async for event in self._run_step(ctx, self.generate_files):
                 yield event
+                
+            yield self._yield_text("taili_orchestrator: [TEST MODE] 测试完成 AnalyzeURDF -> ConfigSynthesis -> GenerateFiles，暂停后续流程。")
+            return
             # 4. 上传到云端，并准备远端执行。
             async for event in self._run_step(ctx, self.publish_cloud):
                 yield event

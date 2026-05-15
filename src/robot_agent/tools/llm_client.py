@@ -10,6 +10,7 @@ an API key from the environment.
 from dataclasses import dataclass
 import json
 import os
+import sys
 from typing import Any, TypeVar
 
 from openai import OpenAI
@@ -50,11 +51,24 @@ class UnifiedLLMClient:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=self.config.temperature,
+                    reasoning_effort="high",
+                    extra_body={"thinking": {"type": "enabled"}},
                     response_format={"type": "json_object"},
+                    stream=True
                 )
-                text = response.choices[0].message.content or "{}"
-                return schema.model_validate_json(text)
+                
+                print(f"\n\033[96m[{schema_name} LLM Response Stream]\033[0m")
+                full_text = ""
+                for chunk in response:
+                    delta = chunk.choices[0].delta
+                    # For deepseek-reasoner reasoning chunks
+                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                        print(f"\033[90m{delta.reasoning_content}\033[0m", end="", flush=True)
+                    # For normal content chunks
+                    if hasattr(delta, "content") and delta.content:
+                        full_text += delta.content
+                print("\n")
+                return schema.model_validate_json(full_text)
             except Exception as exc:
                 last_error = exc
         raise RuntimeError(f"Failed to call DeepSeek model for {schema_name}: {last_error}")

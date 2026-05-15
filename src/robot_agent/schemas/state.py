@@ -130,16 +130,8 @@ STATE_P2_CONFIG_VERSION = "phase2.config.version"
 STATE_P2_CONFIG_PARENT_VERSION = "phase2.config.parent_version"
 # 历史配置版本列表。
 STATE_P2_CONFIG_HISTORY = "phase2.config.history"
-# 最近一次修改的字段列表。
-STATE_P2_CONFIG_LAST_CHANGES = "phase2.config.last_changes"
-# 最近一次修改原因。
-STATE_P2_CONFIG_LAST_REASON = "phase2.config.last_reason"
 # 任务模板名。
 STATE_P2_CONFIG_TEMPLATE = "phase2.config.template_name"
-# reward 配置。
-STATE_P2_CONFIG_REWARD = "phase2.config.reward_spec"
-# 训练超参数。
-STATE_P2_CONFIG_HYPERPARAMS = "phase2.config.hyperparams"
 # 配置生成后的 JSON 文本。
 STATE_P2_CONFIG_TEXT = "phase2.config.generated_text"
 

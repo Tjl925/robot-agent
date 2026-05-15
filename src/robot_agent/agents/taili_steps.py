@@ -41,12 +41,8 @@ from robot_agent.schemas.state import (
     STATE_P2_ARCHIVE_COMPLETED,
     STATE_P2_ARCHIVE_SUMMARY,
     STATE_P2_CONFIG_HISTORY,
-    STATE_P2_CONFIG_HYPERPARAMS,
-    STATE_P2_CONFIG_LAST_CHANGES,
-    STATE_P2_CONFIG_LAST_REASON,
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
-    STATE_P2_CONFIG_REWARD,
     STATE_P2_CONFIG_TEMPLATE,
     STATE_P2_CONFIG_TEXT,
     STATE_P2_CONFIG_VERSION,
@@ -196,6 +192,7 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.ANALYZE_URDF
+        yield self._yield_text(f"[{self.name}] 正在评估 URDF 结构并分析可训练风险，请稍候...")
         urdf_path = Path(self.cfg.local_robot_root) / self.cfg.local_robots_subdir / "robot.urdf"
         urdf_text = urdf_path.read_text(encoding="utf-8", errors="replace") if urdf_path.exists() else ""
         input_payload = self._build_input_payload(ctx, urdf_path, urdf_text)
@@ -209,44 +206,82 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
         ctx.session.state[STATE_P2_URDF_ISSUES] = result.issues
         ctx.session.state[STATE_P2_URDF_RISK] = result.risk
         self._add_log(ctx, f"[{self.name}] URDF 诊断完成 risk={result.risk} valid={result.valid}")
-        yield self._yield_text(result.model_dump_json(indent=2))
+        yield self._yield_text("URDF诊断结果:\n" + result.model_dump_json(indent=2))
 
 
 class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
     cfg: TailiCloudConfig
-    model: str = "gemini-2.5-flash"
     description: str = "Synthesizes a strict JSON Taili configuration draft from task, URDF, and failure evidence."
     instruction: str = (
         "你是 Taili 的配置生成专家。你必须只输出严格 JSON，不要输出任何 Markdown、解释性前缀或多余文本。\n"
         "你要根据输入上下文生成一版可直接进入发布流程的配置草案。\n"
         "当 mode=create 时，你要给出首版合理配置；当 mode=revise 时，你必须基于失败证据做最小必要修改。\n"
-        "你必须显式考虑：任务目标、URDF 诊断、参考模板、历史版本、失败原因、迭代轮次、云端路径。\n"
+        "你必须显式考虑：任务目标、URDF 诊断、参考模板、历史版本、失败原因、迭代轮次。\n"
         "输出必须符合如下 JSON 结构：\n"
         "{\n"
         '  "mode": "create" | "revise",\n'
         '  "version": integer,\n'
         '  "parent_version": integer | null,\n'
         '  "task_name": string,\n'
+        '  "reasoning": string,\n'
         '  "asset_code": string,\n'
+        '  "agents_init_code": string,\n'
+        '  "agents_ppo_cfg_code": string,\n'
         '  "task_init_code": string,\n'
-        '  "task_cfg_code": string,\n'
-        '  "reward": object,\n'
-        '  "hyperparams": object,\n'
-        '  "assumptions": [string, ...],\n'
-        '  "risk_flags": [string, ...],\n'
-        '  "changed_fields": [string, ...],\n'
-        '  "change_reason": string | null\n'
+        '  "flat_env_cfg_code": string,\n'
+        '  "rough_env_cfg_code": string\n'
         "}\n"
     )
     output_schema: ClassVar[Any] = TailiConfigDraft
     output_key: str = STATE_P2_CONFIG_TEXT
     model_config = {"arbitrary_types_allowed": True}
 
+    def _read_generated_files(self) -> dict[str, str] | None:
+        """从 .taili_generated/ 目录读取上一版实际生成的 6 个文件。
+        
+        revise 模式下，大模型需要看到上次的完整代码才能做精准修改。
+        如果目录不存在或为空，返回 None（说明是首次生成）。
+        """
+        gen_dir = Path(self.cfg.local_robot_root) / ".taili_generated"
+        if not gen_dir.exists():
+            return None
+        file_map = {
+            "taili_quad.py": gen_dir / "taili_quad.py",
+            "agents/__init__.py": gen_dir / "agents" / "__init__.py",
+            "agents/rsl_rl_ppo_cfg.py": gen_dir / "agents" / "rsl_rl_ppo_cfg.py",
+            "__init__.py": gen_dir / "__init__.py",
+            "flat_env_cfg.py": gen_dir / "flat_env_cfg.py",
+            "rough_env_cfg.py": gen_dir / "rough_env_cfg.py",
+        }
+        result = {}
+        for name, path in file_map.items():
+            if path.exists():
+                result[name] = path.read_text(encoding="utf-8", errors="replace")
+        return result if result else None
+
     def _build_context(self, ctx: InvocationContext) -> TailiConfigContext:
         mode = str(ctx.session.state.get(STATE_P2_CONFIG_MODE, "create"))
         risk = str(ctx.session.state.get(STATE_P2_URDF_RISK, "medium"))
         version_index = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0))
         history = list(ctx.session.state.get(STATE_P2_CONFIG_HISTORY, []))
+        
+        ref_root = Path("reference/robot_lab")
+        unitree_b2_root = ref_root / "tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2"
+        ref_files = {
+            "unitree.py": ref_root / "assets/unitree.py",
+            "agents/__init__.py": unitree_b2_root / "agents/__init__.py",
+            "agents/rsl_rl_ppo_cfg.py": unitree_b2_root / "agents/rsl_rl_ppo_cfg.py",
+            "__init__.py": unitree_b2_root / "__init__.py",
+            "flat_env_cfg.py": unitree_b2_root / "flat_env_cfg.py",
+            "rough_env_cfg.py": unitree_b2_root / "rough_env_cfg.py"
+        }
+        reference_templates = {}
+        for name, path in ref_files.items():
+            reference_templates[name] = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        
+        # revise 模式下从磁盘读取上一版生成的实际代码，create 模式下为 None
+        current_draft = self._read_generated_files() if mode == "revise" else None
+            
         return TailiConfigContext(
             mode=mode,
             version=version_index + 1,
@@ -256,16 +291,13 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             urdf_text=Path(self.cfg.local_robot_root, self.cfg.local_robots_subdir, "robot.urdf").read_text(encoding="utf-8", errors="replace") if Path(self.cfg.local_robot_root, self.cfg.local_robots_subdir, "robot.urdf").exists() else None,
             urdf_risk=risk,
             urdf_issues=ctx.session.state.get(STATE_P2_URDF_ISSUES, []),
-            current_draft=history[-1] if history else None,
+            current_draft=current_draft,
             history=history,
             failure_reasons=list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, [])),
             failure_summary=str(ctx.session.state.get(STATE_P2_HITL_REASON, "")),
             iteration_round=int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)),
             max_iterations=int(ctx.session.state.get("phase2.train.max_iterations", self.cfg.max_training_iterations)),
-            cloud_asset_path=self.cfg.cloud_asset_path,
-            cloud_task_init_path=self.cfg.cloud_task_init_path,
-            cloud_task_cfg_root=self.cfg.cloud_task_cfg_root,
-            cloud_data_root=f"{self.cfg.cloud_robot_lab_root}/source/robot_lab/data/Robots",
+            reference_templates=reference_templates,
         )
 
     def _build_prompt_payload(self, context: TailiConfigContext) -> dict:
@@ -280,22 +312,14 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             "failure_summary": context.failure_summary,
             "iteration_round": context.iteration_round,
             "max_iterations": context.max_iterations,
-            "cloud_asset_path": context.cloud_asset_path,
-            "cloud_task_init_path": context.cloud_task_init_path,
-            "cloud_task_cfg_root": context.cloud_task_cfg_root,
-            "cloud_data_root": context.cloud_data_root,
             "current_draft": context.current_draft,
             "history": context.history[-3:],
-            "reference_templates": {
-                "asset": "reference/robot_lab/assets/unitree.py",
-                "task_init": "reference/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/__init__.py",
-                "task_cfg": "reference/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/rough_env_cfg.py",
-                "agents": "reference/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/unitree_b2/agents"
-            },
+            "reference_templates": context.reference_templates,
         }
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.SYNTHESIZE_CONFIG
+        yield self._yield_text(f"[{self.name}] 正在生成核心配置草案，请稍候...")
         context = self._build_context(ctx)
         prompt_text = f"请基于以下完整事实执行你的任务:\n{json.dumps(self._build_prompt_payload(context), ensure_ascii=False)}"
         draft = UnifiedLLMClient().generate_json(
@@ -304,17 +328,20 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             schema=TailiConfigDraft,
         )
         history = list(ctx.session.state.get(STATE_P2_CONFIG_HISTORY, []))
-        history.append(draft.model_dump())
+        summary = {
+            "mode": draft.mode,
+            "version": draft.version,
+            "task_name": draft.task_name,
+            "reasoning": draft.reasoning,
+        }
+        history.append(summary)
         ctx.session.state[STATE_P2_CONFIG_HISTORY] = history
-        ctx.session.state[STATE_P2_CONFIG_LAST_CHANGES] = draft.changed_fields
         ctx.session.state[STATE_P2_CONFIG_TEMPLATE] = "quadruped_taili_velocity"
-        ctx.session.state[STATE_P2_CONFIG_REWARD] = draft.reward
-        ctx.session.state[STATE_P2_CONFIG_HYPERPARAMS] = draft.hyperparams
         ctx.session.state[STATE_P2_CONFIG_TEXT] = draft.model_dump_json(indent=2)
         ctx.session.state[STATE_P2_CONFIG_MODE] = draft.mode
         ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = draft.parent_version
         self._add_log(ctx, f"[{self.name}] 配置生成完成 mode={draft.mode} version={draft.version}")
-        yield self._yield_text(draft.model_dump_json(indent=2))
+        yield self._yield_text(f"[{self.name}] 配置生成完毕:\n{json.dumps(summary, ensure_ascii=False, indent=2)}")
 
 
 class GenerateTailiFilesStepAgent(_TailiStepBaseAgent):
@@ -322,27 +349,32 @@ class GenerateTailiFilesStepAgent(_TailiStepBaseAgent):
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.GENERATE_FILES
         local_outputs = Path(self.cfg.local_robot_root) / ".taili_generated"
         local_outputs.mkdir(parents=True, exist_ok=True)
-        asset_text = render_taili_asset_py(self.cfg.local_robot_root, self.cfg.task_name)
-        init_text = render_taili_task_init_py(self.cfg.task_name)
-        task_cfg_text = render_taili_task_cfg_py(
-            self.cfg.task_name,
-            reward=ctx.session.state.get(STATE_P2_CONFIG_REWARD, {}),
-            hyperparams=ctx.session.state.get(STATE_P2_CONFIG_HYPERPARAMS, {}),
-        )
-        local_asset_path = local_outputs / "taili_quad.py"
-        local_init_path = local_outputs / "__init__.py"
-        local_task_cfg_path = local_outputs / "rough_env_cfg.py"
-        local_asset_path.write_text(asset_text, encoding="utf-8")
-        local_init_path.write_text(init_text, encoding="utf-8")
-        local_task_cfg_path.write_text(task_cfg_text, encoding="utf-8")
+        (local_outputs / "agents").mkdir(parents=True, exist_ok=True)
+        
+        draft_json = ctx.session.state.get(STATE_P2_CONFIG_TEXT, "{}")
+        draft = TailiConfigDraft.model_validate_json(draft_json)
+        
+        files_to_write = {
+            "taili_quad.py": draft.asset_code,
+            "agents/__init__.py": draft.agents_init_code,
+            "agents/rsl_rl_ppo_cfg.py": draft.agents_ppo_cfg_code,
+            "__init__.py": draft.task_init_code,
+            "flat_env_cfg.py": draft.flat_env_cfg_code,
+            "rough_env_cfg.py": draft.rough_env_cfg_code,
+        }
+        
+        written_files = []
+        for rel_path, content in files_to_write.items():
+            file_path = local_outputs / rel_path
+            file_path.write_text(content, encoding="utf-8")
+            written_files.append(str(file_path))
 
         generated_manifest = {
             "local_root": self.cfg.local_robot_root,
             "generated_dir": str(local_outputs),
-            "files": [str(local_asset_path), str(local_init_path), str(local_task_cfg_path)],
-            "task_name": self.cfg.task_name,
+            "files": written_files,
+            "task_name": draft.task_name,
         }
-        ctx.session.state["phase2.generated.manifest"] = generated_manifest
         ctx.session.state[STATE_P2_CONFIG_TEXT] = json.dumps(generated_manifest, ensure_ascii=False, indent=2)
         self._add_log(ctx, f"[{self.name}] 本地发布文件已生成")
         yield self._yield_text(f"{self.name}: 本地发布文件已生成")
@@ -361,8 +393,11 @@ class PublishTailiWorkspaceStepAgent(_TailiStepBaseAgent):
             files=[
                 (f"{self.cfg.local_robots_subdir}/robot.urdf", "source/robot_lab/robot_lab/data/Robots/robot.urdf"),
                 (".taili_generated/taili_quad.py", self.cfg.cloud_asset_path.replace(self.cfg.cloud_robot_lab_root + "/", "")),
+                (".taili_generated/agents/__init__.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/agents/__init__.py"),
+                (".taili_generated/agents/rsl_rl_ppo_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/agents/rsl_rl_ppo_cfg.py"),
                 (".taili_generated/__init__.py", self.cfg.cloud_task_init_path.replace(self.cfg.cloud_robot_lab_root + "/", "")),
-                (".taili_generated/rough_env_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + "/", "")}/rough_env_cfg.py"),
+                (".taili_generated/flat_env_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/flat_env_cfg.py"),
+                (".taili_generated/rough_env_cfg.py", f"{self.cfg.cloud_task_cfg_root.replace(self.cfg.cloud_robot_lab_root + '/', '')}/rough_env_cfg.py"),
             ],
         )
         uploaded = remote_upload_taili_workspace(
@@ -387,13 +422,6 @@ class PublishTailiWorkspaceStepAgent(_TailiStepBaseAgent):
         }
         self._add_log(ctx, f"[{self.name}] 远端发布完成: copied={copied}, uploaded={uploaded}")
         yield self._yield_text(f"{self.name}: 云端发布完成，准备验证")
-
-
-# 注意：原 EvaluateTailiJudgeAgent 已被移除。
-# 该类使用了未导入的 LlmAgent 基类，会导致模块级别的 NameError。
-# 实际评估功能已由 EvaluateTailiTrainingLogAgent（日志评估）和
-# EvaluateTailiVideoAgent（视频评估）分别承担，编排器中也未引用此类。
-
 
 class TrainTailiStepAgent(_TailiStepBaseAgent):
     evaluate_training_log: EvaluateTailiTrainingLogAgent | None = None
