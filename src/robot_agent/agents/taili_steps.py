@@ -46,35 +46,35 @@ from robot_agent.schemas.state import (
     STATE_P2_CONFIG_TEMPLATE,
     STATE_P2_CONFIG_TEXT,
     STATE_P2_CONFIG_VERSION,
-    STATE_P2_EVAL_CHECK_INTERVAL,
-    STATE_P2_EVAL_CHECKPOINT_GLOB,
-    STATE_P2_EVAL_CHECKPOINT_PATH,
     STATE_P2_EVAL_FAIL_REASONS,
-    STATE_P2_EVAL_LAST_CHECK_ITER,
-    STATE_P2_EVAL_LAST_CHECK_SUMMARY,
-    STATE_P2_EVAL_LOG_ROOT,
-    STATE_P2_EVAL_EARLY_STOP_RULES,
-    STATE_P2_EVAL_METRIC_SPECS,
     STATE_P2_EVAL_PASSED,
     STATE_P2_EVAL_SCORE,
-    STATE_P2_EVAL_VIDEO_NAME,
     STATE_P2_EVAL_VIDEO_PATH,
+    STATE_P2_EVAL_VIDEO_REMOTE_PATH,
     STATE_P2_EVENTS,
     STATE_P2_HITL_REASON,
     STATE_P2_HITL_REQUIRED,
     STATE_P2_HITL_RESPONSE,
     STATE_P2_HITL_RESOLVED,
     STATE_P2_ITER_ROUND,
+    STATE_P2_PLAY_EXIT_CODE,
+    STATE_P2_PLAY_FAILED,
+    STATE_P2_PLAY_STDERR,
+    STATE_P2_PLAY_STDOUT,
     STATE_P2_STAGE,
     STATE_P2_STATUS,
     STATE_P2_TRAIN_COMMAND,
-    STATE_P2_TRAIN_EARLY_STOPPED,
-    STATE_P2_TRAIN_RUN_ID,
+    STATE_P2_TRAIN_LOG_INPUT,
+    STATE_P2_TRAIN_LOG_JUDGE_RESULT,
+    STATE_P2_TRAIN_LOG_PATH,
+    STATE_P2_TRAIN_METRIC_HISTORY,
+    STATE_P2_TRAIN_PID,
     STATE_P2_TRAIN_STATUS,
-    STATE_P2_TRAIN_TOTAL_ITERATIONS,
     STATE_P2_URDF_ISSUES,
     STATE_P2_URDF_RISK,
     STATE_P2_URDF_VALID,
+    STATE_P2_VIDEO_INPUT_PAYLOAD,
+    STATE_P2_VIDEO_JUDGE_RESULT,
     Phase2Stage,
 )
 from robot_agent.tools.llm_client import UnifiedLLMClient
@@ -82,6 +82,7 @@ from robot_agent.tools.ssh_client import execute_ssh_command
 from robot_agent.tools.taili_cloud import (
     download_remote_file_to_temp,
     fetch_remote_file,
+    remote_check_training_status,
     remote_find_latest_video_file,
     remote_kill_process,
     remote_list_latest_run,
@@ -178,7 +179,7 @@ class AnalyzeTailiUrdfStepAgent(_TailiStepBaseAgent):
             failure_reasons=list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, [])),
             failure_summary=str(ctx.session.state.get(STATE_P2_HITL_REASON, "")),
             iteration_round=int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)),
-            max_iterations=int(ctx.session.state.get("phase2.train.max_iterations", self.cfg.max_training_iterations)),
+            max_iterations=self.cfg.max_training_iterations,
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -287,7 +288,7 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             failure_reasons=list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, [])),
             failure_summary=str(ctx.session.state.get(STATE_P2_HITL_REASON, "")),
             iteration_round=int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)),
-            max_iterations=int(ctx.session.state.get("phase2.train.max_iterations", self.cfg.max_training_iterations)),
+            max_iterations=self.cfg.max_training_iterations,
             reference_templates=reference_templates,
         )
 
@@ -390,6 +391,15 @@ class PublishTailiWorkspaceStepAgent(_TailiStepBaseAgent):
         yield self._yield_text(f"{self.name}: 云端发布完成，准备训练")
 
 class TrainTailiStepAgent(_TailiStepBaseAgent):
+    """云端训练执行与日志轮询 Agent。
+
+    【输出状态协议】
+    训练结束后只通过 STATE_P2_TRAIN_STATUS 向编排器传达退出状态：
+    - "early_stopped": 训练发散/崩溃，已杀死远端进程，不渲染视频。
+                       失败原因写入 STATE_P2_EVAL_FAIL_REASONS。
+    - "completed":     训练正常跑完或已收敛，已渲染视频，等待视频裁判。
+    TrainAgent 不设置 EVAL_PASSED，最终通过/不通过由视频裁判决定。
+    """
     evaluate_training_log: EvaluateTailiTrainingLogAgent | None = None
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -402,27 +412,32 @@ class TrainTailiStepAgent(_TailiStepBaseAgent):
             raise RuntimeError("缺少远端 SSH 信息，无法启动训练")
         if not ctx.session.state.get(STATE_P2_TRAIN_COMMAND):
             ctx.session.state[STATE_P2_TRAIN_COMMAND] = self.cfg.train_command_template.format(task_name=self.cfg.task_name)
+
+        # 【阶段 1：下发训练指令，记录 pid 和日志路径】
         start_info = start_remote_training(host, port, user, password, str(ctx.session.state[STATE_P2_TRAIN_COMMAND]), self.cfg.remote_timeout_seconds)
-        ctx.session.state["phase2.train.pid"] = start_info["pid"]
-        ctx.session.state["phase2.train.log_path"] = start_info["log_path"]
-        ctx.session.state["phase2.train.log_offset"] = 0
+        train_pid = start_info["pid"]
+        train_exit_code_path = start_info["exit_code_path"]
+        ctx.session.state[STATE_P2_TRAIN_PID] = train_pid
+        ctx.session.state[STATE_P2_TRAIN_LOG_PATH] = start_info["log_path"]
         ctx.session.state[STATE_P2_TRAIN_STATUS] = "running"
 
         last_evaluated_iteration = 0
-        last_output = ""
-        last_offset = 0
+        byte_offset = 0
+        pending_log_buffer = ""
         sleep_seconds = 300.0
-        current_check_interval = 20
         metric_history: list[dict] = []
-        ctx.session.state["phase2.train.metric_history"] = metric_history
+        poll_round = 0
+        sample_window_size = self.cfg.eval_sample_window_size
+        ctx.session.state[STATE_P2_TRAIN_METRIC_HISTORY] = metric_history
 
+        # 【阶段 2：自适应预热与步长估算】
         warmup_hit = False
         for _ in range(3):
             await asyncio.sleep(20)
-            current_output = remote_tail_log(host, port, user, password, start_info["log_path"], self.cfg.remote_timeout_seconds)
-            if "Learning iteration" in current_output and "Iteration time:" in current_output:
+            warmup_text, byte_offset = remote_tail_log(host, port, user, password, start_info["log_path"], self.cfg.remote_timeout_seconds, byte_offset)
+            if "Learning iteration" in warmup_text and "Iteration time:" in warmup_text:
                 warmup_hit = True
-                match = re.search(r"Iteration time:\s*([\d.]+)s", current_output, flags=re.IGNORECASE)
+                match = re.search(r"Iteration time:\s*([\d.]+)s", warmup_text, flags=re.IGNORECASE)
                 if match:
                     try:
                         iteration_time = float(match.group(1))
@@ -431,87 +446,153 @@ class TrainTailiStepAgent(_TailiStepBaseAgent):
                         sleep_seconds = 300.0
                 else:
                     sleep_seconds = 300.0
+                pending_log_buffer = warmup_text
                 break
         if not warmup_hit:
             sleep_seconds = 300.0
 
+        # 【阶段 3：长时轮询与采样窗口日志截取】
+        # 核心设计：
+        #   1. 每轮从远端增量拉取新日志，拼接到 pending_log_buffer。
+        #   2. 用正则解析出所有完整的 checkpoint blocks。
+        #   3. 最后一个 block 可能尚未写完（远端训练仍在输出），
+        #      因此将其保留回 pending_log_buffer，只处理前面确认完整的 blocks。
+        #   4. 在确认完整的新增 blocks 中，只取最后 sample_window_size 个
+        #      组成一个采样窗口，追加到 metric_history。
+        #   5. last_evaluated_iteration 更新为所有新增 blocks 的最大 iteration，
+        #      避免下一轮重复处理被跳过的中间 iteration。
         max_checks = max(1, int((self.cfg.max_training_minutes * 60) // max(1.0, sleep_seconds)))
         for _ in range(max_checks):
-            current_output = remote_tail_log(host, port, user, password, start_info["log_path"], self.cfg.remote_timeout_seconds).strip()
-            if not current_output:
-                await asyncio.sleep(sleep_seconds)
-                continue
-            current_offset = len(current_output)
-            if current_offset <= last_offset:
-                await asyncio.sleep(sleep_seconds)
-                continue
-            new_text = current_output[last_offset:]
-            last_offset = current_offset
-            recent_window = self._extract_recent_iteration_window(new_text, window_size=5)
-            blocks = self._extract_checkpoint_blocks(recent_window)
-            if not blocks:
-                await asyncio.sleep(sleep_seconds)
-                continue
-            checkpoint_index, checkpoint_block = blocks[-1]
-            if checkpoint_index <= last_evaluated_iteration or checkpoint_block == last_output:
-                await asyncio.sleep(sleep_seconds)
-                continue
-            last_evaluated_iteration = checkpoint_index
-            last_output = checkpoint_block
-            ctx.session.state["phase2.train.current_checkpoint_output"] = checkpoint_block
-            ctx.session.state["phase2.train.current_checkpoint_index"] = checkpoint_index
-            ctx.session.state["phase2.train.last_evaluated_iteration"] = checkpoint_index
-            ctx.session.state["phase2.train.recent_iteration_window"] = recent_window
-            metrics_dict = self._extract_metrics_dict(checkpoint_block, checkpoint_index)
-            metric_history.append(metrics_dict)
-            ctx.session.state["phase2.train.metric_history"] = metric_history
-            self._add_log(ctx, f"[{self.name}] checkpoint={checkpoint_index} captured")
-            yield self._yield_text(recent_window)
+            new_text, byte_offset = remote_tail_log(host, port, user, password, start_info["log_path"], self.cfg.remote_timeout_seconds, byte_offset)
+            if new_text:
+                pending_log_buffer += new_text
 
+            all_blocks = self._extract_checkpoint_blocks(pending_log_buffer)
+            if not all_blocks:
+                await asyncio.sleep(sleep_seconds)
+                continue
+
+            # 保护未完成的最后一个 block：
+            # "Training time:" 出现表示训练已结束，所有 block 确认完整。
+            last_block_text = all_blocks[-1][1]
+            last_block_pos = pending_log_buffer.rfind(last_block_text)
+            training_finished = "Training time:" in pending_log_buffer
+            if training_finished:
+                confirmed_blocks = all_blocks
+                pending_log_buffer = ""
+            else:
+                confirmed_blocks = all_blocks[:-1] if len(all_blocks) > 1 else []
+                if last_block_pos >= 0:
+                    pending_log_buffer = pending_log_buffer[last_block_pos:]
+                if not confirmed_blocks:
+                    await asyncio.sleep(sleep_seconds)
+                    continue
+
+            # 筛选出本轮新增的 blocks
+            new_blocks = [(idx, blk) for idx, blk in confirmed_blocks if idx > last_evaluated_iteration]
+            if not new_blocks:
+                await asyncio.sleep(sleep_seconds)
+                continue
+
+            # 采样窗口：只取最后 N 个 block 的指标
+            sampled = new_blocks[-sample_window_size:]
+            sample_metrics = [self._extract_metrics_dict(blk, idx) for idx, blk in sampled]
+
+            # last_evaluated_iteration 更新为所有新增 blocks 的最大 iteration
+            last_evaluated_iteration = new_blocks[-1][0]
+            poll_round += 1
+
+            window_entry = {
+                "poll_round": poll_round,
+                "iteration_range": [sampled[0][0], sampled[-1][0]],
+                "total_new_blocks": len(new_blocks),
+                "samples": sample_metrics,
+            }
+            metric_history.append(window_entry)
+            ctx.session.state[STATE_P2_TRAIN_METRIC_HISTORY] = metric_history
+            self._add_log(ctx, f"[{self.name}] poll#{poll_round} sampled iter {sampled[0][0]}~{sampled[-1][0]} ({len(sampled)}/{len(new_blocks)})")
+
+            sampled_text = "\n\n".join(blk for _, blk in sampled)
+            yield self._yield_text(f"[poll #{poll_round}] iteration {sampled[0][0]}~{sampled[-1][0]}\n{sampled_text}")
+
+            # 【阶段 4：唤起日志裁判】
             judge_input = {
-                "metric_history": metric_history,
+                "metric_history": metric_history,  # 采样窗口列表，非平铺指标
                 "iteration_round": int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)),
-                "check_interval": int(ctx.session.state.get(STATE_P2_EVAL_CHECK_INTERVAL, self.cfg.eval_check_interval)),
-                "current_check_interval": current_check_interval,
+                "check_interval": self.cfg.eval_check_interval,
                 "sleep_seconds": sleep_seconds,
                 "metric_specs": self.cfg.eval_metric_specs,
                 "early_stop_rules": self.cfg.eval_early_stop_rules,
             }
-            ctx.session.state["phase2.train.log_input_payload"] = judge_input
-            prompt_text = json.dumps(judge_input, ensure_ascii=False)
-            await ctx.session_service.append_event(
-                ctx.session,
-                Event(
-                    author="system_context",
-                    content=types.Content(role="user", parts=[types.Part(text=f"请基于以下输入执行你的任务:\n{prompt_text}")]),
-                ),
-            )
+            ctx.session.state[STATE_P2_TRAIN_LOG_INPUT] = judge_input
             async for judge_event in self.evaluate_training_log.run_async(ctx):
                 yield judge_event
-            judge_result = ctx.session.state.get("phase2.train.log_judge_result", {}) or {}
+
+            # 【阶段 5：裁决行动响应】
+            # 只通过 STATE_P2_TRAIN_STATUS 传达退出状态，不设置 EVAL_PASSED。
+            judge_result = ctx.session.state.get(STATE_P2_TRAIN_LOG_JUDGE_RESULT, {}) or {}
             action = str(judge_result.get("action", "continue"))
             if action == "stop_failed":
-                remote_kill_process(host, port, user, password, str(start_info["pid"]), self.cfg.remote_timeout_seconds)
-                ctx.session.state[STATE_P2_TRAIN_EARLY_STOPPED] = True
+                remote_kill_process(host, port, user, password, train_pid, self.cfg.remote_timeout_seconds)
                 ctx.session.state[STATE_P2_TRAIN_STATUS] = "early_stopped"
-                ctx.session.state[STATE_P2_EVAL_PASSED] = False
-                ctx.session.state["phase2.train.early_stop_reason"] = "; ".join(judge_result.get("reasons", []))
-                yield self._yield_text(f"{self.name}: early stop executed")
+                ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = judge_result.get("reasons", [])
+                yield self._yield_text(f"{self.name}: 训练发散，已执行 early stop")
                 return
             if action == "stop_converged":
-                remote_kill_process(host, port, user, password, str(start_info["pid"]), self.cfg.remote_timeout_seconds)
-                ctx.session.state[STATE_P2_TRAIN_EARLY_STOPPED] = False
+                remote_kill_process(host, port, user, password, train_pid, self.cfg.remote_timeout_seconds)
                 ctx.session.state[STATE_P2_TRAIN_STATUS] = "completed"
-                ctx.session.state[STATE_P2_EVAL_PASSED] = True
-                ctx.session.state["phase2.train.converged"] = True
-                ctx.session.state["phase2.train.should_stop"] = True
-                yield self._yield_text(f"{self.name}: training converged, moving to play")
+                yield self._yield_text(f"{self.name}: 训练已收敛，进入视频渲染")
                 break
-            current_check_interval = min(500, max(current_check_interval + 1, current_check_interval * 2 if current_check_interval < 60 else current_check_interval))
+
+            # 【阶段 5.5：检查远端训练进程状态】
+            # 裁判判定 continue 后，在休眠前检查远端进程是否已自行退出。
+            remote_status = remote_check_training_status(host, port, user, password, train_pid, train_exit_code_path, self.cfg.remote_timeout_seconds)
+            rs = remote_status["status"]
+            if rs == "completed":
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "completed"
+                yield self._yield_text(f"{self.name}: 远端训练已自然结束 (exit=0)，进入视频渲染")
+                break
+            if rs == "failed":
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "train_failed"
+                ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = [f"远端训练命令非零退出 (exit_code={remote_status['exit_code']})"]
+                yield self._yield_text(f"{self.name}: 远端训练失败 (exit={remote_status['exit_code']})")
+                return
+            if rs == "unknown_failed":
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "train_failed"
+                ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = ["训练进程已退出，但未生成 exit_code 文件，状态未知"]
+                yield self._yield_text(f"{self.name}: 训练进程异常退出，状态未知")
+                return
+            # rs == "running" → 继续轮询
             await asyncio.sleep(sleep_seconds)
         else:
-            ctx.session.state[STATE_P2_TRAIN_STATUS] = "completed"
+            # max_checks 到期：不允许直接标记 completed，必须再次检查远端状态。
+            remote_status = remote_check_training_status(host, port, user, password, train_pid, train_exit_code_path, self.cfg.remote_timeout_seconds)
+            rs = remote_status["status"]
+            if rs == "completed":
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "completed"
+                yield self._yield_text(f"{self.name}: 轮询到期，远端训练已正常结束 (exit=0)")
+            elif rs == "failed":
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "train_failed"
+                ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = [f"轮询到期，远端训练命令非零退出 (exit_code={remote_status['exit_code']})"]
+                yield self._yield_text(f"{self.name}: 轮询到期，训练失败 (exit={remote_status['exit_code']})")
+                return
+            elif rs == "running":
+                # 超时但进程仍存活 → 强制终止
+                remote_kill_process(host, port, user, password, train_pid, self.cfg.remote_timeout_seconds)
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "train_timeout"
+                ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = [f"训练超过 {self.cfg.max_training_minutes} 分钟仍未自然结束，已终止远端进程"]
+                yield self._yield_text(f"{self.name}: 训练超时，已终止远端进程")
+                return
+            else:
+                # unknown_failed
+                ctx.session.state[STATE_P2_TRAIN_STATUS] = "train_failed"
+                ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = ["轮询到期，训练进程已退出但未生成 exit_code 文件，无法确认正常完成"]
+                yield self._yield_text(f"{self.name}: 训练进程异常退出，状态未知")
+                return
 
+        # 【阶段 6：视频渲染 (Play) 流程】
+        # 当训练达到最大设定步数自然完成，或被裁判认定为“已收敛”时，会执行此部分。
+        # 阻塞式地调用 play.py 渲染策略输出视频，以备最后的视频裁判 Agent 使用。
         yield self._yield_text(f"{self.name}: 开始渲染评估视频...")
         play_cmd = self.cfg.play_command_template.format(task_name=self.cfg.task_name)
         if self.cfg.play_num_envs is not None:
@@ -521,25 +602,25 @@ class TrainTailiStepAgent(_TailiStepBaseAgent):
             port=port,
             username=user,
             password=password,
-            command=f"cd /root/robot_lab && {play_cmd}",
-            timeout_seconds=300,
+            command=play_cmd,
+            timeout_seconds=self.cfg.play_timeout_seconds,
         )
-        ctx.session.state["phase2.play.command"] = play_cmd
-        ctx.session.state["phase2.play.stdout"] = play_out
-        ctx.session.state["phase2.play.stderr"] = play_err
-        ctx.session.state["phase2.play.exit_code"] = play_code
-        ctx.session.state[STATE_P2_TRAIN_STATUS] = "completed"
+        ctx.session.state[STATE_P2_PLAY_STDOUT] = play_out
+        ctx.session.state[STATE_P2_PLAY_STDERR] = play_err
+        ctx.session.state[STATE_P2_PLAY_EXIT_CODE] = play_code
         if play_code != 0:
             self._add_log(ctx, f"视频渲染失败: {play_err or play_out}")
-            ctx.session.state["phase2.play.failed"] = True
-        else:
-            ctx.session.state["phase2.play.failed"] = False
-        yield self._yield_text(f"{self.name}: training completed, play rendered")
+            ctx.session.state[STATE_P2_PLAY_FAILED] = True
+            ctx.session.state[STATE_P2_TRAIN_STATUS] = "play_failed"
+            ctx.session.state[STATE_P2_EVAL_FAIL_REASONS] = [f"play.py 渲染失败 (exit={play_code}): {(play_err or play_out)[:200]}"]
+            yield self._yield_text(f"{self.name}: 视频渲染失败 (exit={play_code})")
+            return
+        ctx.session.state[STATE_P2_PLAY_FAILED] = False
+        yield self._yield_text(f"{self.name}: 训练完成，视频已渲染")
 
 
 class EvaluateTailiTrainingLogAgent(_TailiStepBaseAgent):
     cfg: TailiCloudConfig
-    model: str = "gemini-2.5-flash"
     description: str = "Evaluates full metric history and decides whether to stop."
     instruction: str = (
         "你是 Taili 的强化学习训练裁判。你必须只输出严格 JSON。\n"
@@ -558,23 +639,19 @@ class EvaluateTailiTrainingLogAgent(_TailiStepBaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ctx.session.state[STATE_P2_STAGE] = Phase2Stage.EVALUATE_TRAIN_LOG
         payload = {
-            "metric_history": list(ctx.session.state.get("phase2.train.metric_history", [])),
+            "metric_history": list(ctx.session.state.get(STATE_P2_TRAIN_METRIC_HISTORY, [])),
             "iteration_round": int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)),
             "metric_specs": self.cfg.eval_metric_specs,
             "early_stop_rules": self.cfg.eval_early_stop_rules,
         }
-        ctx.session.state["phase2.train.log_input_payload"] = payload
+        ctx.session.state[STATE_P2_TRAIN_LOG_INPUT] = payload
         prompt_text = f"请基于以下完整事实执行你的任务:\n{json.dumps(payload, ensure_ascii=False)}"
         result = UnifiedLLMClient().generate_json(
             system_prompt=self.instruction,
             user_prompt=prompt_text,
             schema=TailiTrainingLogJudgeResult,
         )
-        ctx.session.state["phase2.train.log_judge_result"] = result.model_dump()
-        if result.action in {"stop_failed", "stop_converged"}:
-            ctx.session.state["phase2.train.should_stop"] = True
-        ctx.session.state["phase2.train.last_checkpoint_index"] = ctx.session.state.get("phase2.train.current_checkpoint_index")
-        ctx.session.state["phase2.train.last_checkpoint_output"] = ctx.session.state.get("phase2.train.current_checkpoint_output", "")
+        ctx.session.state[STATE_P2_TRAIN_LOG_JUDGE_RESULT] = result.model_dump()
         yield self._yield_text(result.model_dump_json(indent=2))
 
 
@@ -612,7 +689,7 @@ class EvaluateTailiVideoAgent(_TailiStepBaseAgent):
             raise RuntimeError("远端视频文件未稳定落盘，无法进入视频评估")
         video_local_path = download_remote_file_to_temp(host, port, user, password, video_remote_path, self.cfg.remote_timeout_seconds)
         ctx.session.state[STATE_P2_EVAL_VIDEO_PATH] = video_local_path
-        ctx.session.state["phase2.video.remote_path"] = video_remote_path
+        ctx.session.state[STATE_P2_EVAL_VIDEO_REMOTE_PATH] = video_remote_path
 
         # TODO(P2-3): 当前视频评估是"元信息裁判"模式——下载视频到本地但只把路径等
         # 元信息传给 LLM，并不传入视频帧。原因是 DeepSeek API 暂不支持视频多模态输入。
@@ -620,19 +697,18 @@ class EvaluateTailiVideoAgent(_TailiStepBaseAgent):
         payload = {
             "video_remote_path": video_remote_path,
             "video_local_path": video_local_path,
-            "checkpoint_path": ctx.session.state.get(STATE_P2_EVAL_CHECKPOINT_PATH),
-            "train_run_id": ctx.session.state.get(STATE_P2_TRAIN_RUN_ID),
-            "play_command": ctx.session.state.get("phase2.play.command"),
+            "play_exit_code": ctx.session.state.get(STATE_P2_PLAY_EXIT_CODE),
+            "play_stderr": ctx.session.state.get(STATE_P2_PLAY_STDERR, ""),
             "note": "当前为元信息评估模式，LLM 无法直接观看视频内容",
         }
-        ctx.session.state["phase2.video.input_payload"] = payload
+        ctx.session.state[STATE_P2_VIDEO_INPUT_PAYLOAD] = payload
         prompt_text = f"请基于以下完整事实执行你的任务:\n{json.dumps(payload, ensure_ascii=False)}"
         result = UnifiedLLMClient().generate_json(
             system_prompt=self.instruction,
             user_prompt=prompt_text,
             schema=TailiVideoJudgeResult,
         )
-        ctx.session.state["phase2.video.judge_result"] = result.model_dump()
+        ctx.session.state[STATE_P2_VIDEO_JUDGE_RESULT] = result.model_dump()
 
         # 关键：把视频评估结果写回编排器期望的 state 键，否则编排器永远认为评估没通过。
         ctx.session.state[STATE_P2_EVAL_PASSED] = result.passed
@@ -656,7 +732,7 @@ class RepairTailiWorkflowStepAgent(_TailiStepBaseAgent):
         ctx.session.state[STATE_P2_HITL_RESPONSE] = self.cfg.hitl_response_text or ""
         ctx.session.state[STATE_P2_HITL_RESOLVED] = bool(self.cfg.hitl_response_text)
         ctx.session.state[STATE_P2_HITL_REQUIRED] = False if self.cfg.hitl_response_text else True
-        ctx.session.state[STATE_P2_CONFIG_LAST_REASON] = str(ctx.session.state.get(STATE_P2_HITL_REASON, ctx.session.state.get(STATE_P2_CONFIG_LAST_REASON, "")))
+        # 失败原因已由上游写入 STATE_P2_HITL_REASON / STATE_P2_EVAL_FAIL_REASONS，无需再冗余复制
         self._add_log(ctx, f"[{self.name}] 进入迭代轮次 {ctx.session.state[STATE_P2_ITER_ROUND]}")
         yield self._yield_text(f"{self.name}: 已进入下一轮迭代")
 

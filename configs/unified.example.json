@@ -1,7 +1,7 @@
 {
   "phase1": {
     "api_base": "https://www.autodl.art",
-    "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjYzMTk5MCwidXVpZCI6IjdkMWJiN2RkLWMzNzMtNDE2ZC1iNTE5LTQ5YmUyOGY5ZTRhNCIsInRlbmFudCI6ImF1dG9kbCJ9.nMLpUt4y93XtF8q2Bo1gFPvWqs_QbP2fZp0OpQmERZQar62pf-JXycMsOOpFbGu0ZZuUtgHhG8qnCmm1adW_1A",
+    "token": "YOUR_AUTODL_TOKEN",
     "instance_uuid": "pro-77486d141fd0",
     "app_name": "agents",
     "user_id": "local_user",
@@ -17,14 +17,16 @@
     "train_command_template": "cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless",
     "play_command_template": "cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video",
     "play_num_envs": null,
+    "play_timeout_seconds": 600,
     "eval_log_root": "/root/autodl-tmp/robot_lab/logs/rsl_rl",
     "max_training_iterations": 1000,
     "eval_check_interval": 100,
-    "checkpoint_glob": "model_*.pt",
-    "video_output_name": "eval.mp4",
+    "eval_sample_window_size": 5,
+
+
     "max_auto_iterations": 2,
-    "success_threshold": 0.75,
-    "max_training_minutes": 60,
+
+    "max_training_minutes": 240,
     "hitl_response_text": null,
     "eval_metric_specs": [
       {

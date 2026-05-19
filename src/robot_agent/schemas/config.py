@@ -89,30 +89,30 @@ class TailiCloudConfig(BaseModel):
     remote_password: str | None = Field(default=None, description="由 Phase-1 提供的云端 SSH 密码")
 
     # 云端训练任务名。
-    task_name: str = Field(default="RobotLab-Isaac-Velocity-Rough-Taili-Quad-v0", description="云端训练任务名（固定风格）")
+    task_name: str = Field(default="RobotLab-Isaac-Velocity-Flat-Taili-Quad-v0", description="云端训练任务名（固定风格）")
     # 云端训练命令模板。
-    train_command_template: str = Field(default="cd /root/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless", description="云端训练命令模板，支持变量: task_name")
+    train_command_template: str = Field(default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless", description="云端训练命令模板，支持变量: task_name")
     # 云端播放 / 验证命令模板。
-    play_command_template: str = Field(default="cd /root/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video", description="云端播放/验证命令模板，支持变量: task_name")
+    play_command_template: str = Field(default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video", description="云端播放/验证命令模板，支持变量: task_name")
     # 播放视频时的并行环境数，默认保持脚本默认值（通常是 64）。
     play_num_envs: int | None = Field(default=None, ge=1, description="播放视频时的并行环境数；None 表示不额外传参")
+    # play.py 渲染视频的超时时间（秒）。渲染通常需要 2~5 分钟，不能用默认的 60s。
+    play_timeout_seconds: int = Field(default=600, ge=30, description="play.py 渲染视频的超时时间（秒）")
     # 远端训练日志根目录。
     eval_log_root: str = Field(default="/root/robot_lab/logs/rsl_rl", description="云端训练日志根目录")
     # 总训练迭代次数，动态生成。
     max_training_iterations: int = Field(default=1000, ge=1, description="单轮训练总迭代次数，由配置生成阶段给出")
     # 中间检查间隔（自动推导或覆盖值）。
     eval_check_interval: int = Field(default=100, ge=1, description="训练中日志检查间隔（iterations）")
-    # 用于定位最后训练产物的通配符。
-    checkpoint_glob: str = Field(default="model_*.pt", description="用于定位最后一轮模型的 checkpoint 通配符")
-    # 视频文件名。
-    video_output_name: str = Field(default="eval.mp4", description="播放录制视频文件名")
+    # 每次轮询采样的 checkpoint 窗口大小。取本轮新增 blocks 的最后 N 个组成一个采样窗口。
+    eval_sample_window_size: int = Field(default=5, ge=1, description="每次轮询采样的 checkpoint 数量")
+
 
     # 自动迭代上限。
     max_auto_iterations: int = Field(default=2, ge=0, description="评估失败后允许的自动迭代轮数上限（达到后触发人工介入）。")
-    # 成功阈值。
-    success_threshold: float = Field(default=0.75, ge=0.0, le=1.0, description="通过门槛（示例：success_rate >= success_threshold）。")
+
     # 单轮训练最长分钟数。
-    max_training_minutes: int = Field(default=60, ge=1, description="单轮训练允许的最长分钟数")
+    max_training_minutes: int = Field(default=240, ge=1, description="单轮训练允许的最长分钟数")
     # 人工介入文本。
     hitl_response_text: str | None = Field(default=None, description="人工介入文本。若不为空，则在触发 WAIT_HUMAN 后自动写入并继续执行。")
 
@@ -213,19 +213,6 @@ class TailiConfigDraft(BaseModel):
     rough_env_cfg_code: str
 
 
-class TailiJudgeResult(BaseModel):
-    """Taili 评估 Judge Agent 的结构化输出。"""
-
-    # 是否通过。
-    passed: bool
-    # 评估得分卡 / 证据卡。
-    score: dict
-    # 不通过时的原因列表。
-    reasons: list[str] = Field(default_factory=list)
-    # 下一步动作，例如 archive / revise。
-    next_action: str
-    # 评估使用的证据模式。
-    evidence_mode: str = Field(default="checkpoint_then_play")
 
 
 class TailiTrainingLogJudgeResult(BaseModel):

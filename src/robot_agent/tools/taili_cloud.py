@@ -14,6 +14,7 @@ import shlex
 import shutil
 import tempfile
 import time
+import uuid
 
 import paramiko
 
@@ -22,7 +23,6 @@ from robot_agent.tools.ssh_client import execute_ssh_command
 
 class TailiCloudToolError(RuntimeError):
     """Taili 云端工具失败时抛出。"""
-
 
 
 def upload_files_via_sftp(host: str, port: int, user: str, password: str, files: list[tuple[str, str]], timeout_seconds: int) -> list[dict[str, str]]:
@@ -90,8 +90,6 @@ def remote_upload_taili_workspace(
     return upload_files_via_sftp(host, port, user, password, files, timeout_seconds)
 
 
-
-
 def _mkdir_p_sftp(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
     parts = []
     current = remote_directory
@@ -125,11 +123,96 @@ def remote_list_latest_run(host: str, port: int, user: str, password: str, root:
 
 
 def start_remote_training(host: str, port: int, user: str, password: str, command: str, timeout_seconds: int) -> dict[str, str]:
-    wrapped = f"nohup bash -lc {shlex.quote(command)} > /tmp/taili_train.log 2>&1 < /dev/null & echo $!"
+    """在远端异步启动训练命令。
+
+    会为本次训练生成唯一 run_id，训练命令退出后将 exit code 写入文件，
+    便于后续通过 remote_check_training_status 判断训练是否正常结束。
+
+    Returns:
+        {"pid": str, "log_path": str, "exit_code_path": str, "run_id": str}
+    """
+    run_id = uuid.uuid4().hex[:12]
+    log_path = f"/tmp/taili_train_{run_id}.log"
+    exit_code_path = f"/tmp/taili_train_{run_id}.exit_code"
+
+    # 包装命令：训练结束后写入 exit code 文件
+    wrapped = (
+        f"( bash -lc {shlex.quote(command)}; "
+        f"echo $? > {shlex.quote(exit_code_path)} "
+        f") > {shlex.quote(log_path)} 2>&1 < /dev/null & echo $!"
+    )
     out, err, code = execute_ssh_command(host, port, user, password, wrapped, timeout_seconds)
     if code != 0:
         raise TailiCloudToolError(err or out)
-    return {"pid": out.strip(), "log_path": "/tmp/taili_train.log"}
+    pid = out.strip()
+    if not pid:
+        raise TailiCloudToolError("远端训练启动失败：未返回 PID")
+    return {"pid": pid, "log_path": log_path, "exit_code_path": exit_code_path, "run_id": run_id}
+
+
+def remote_check_training_status(
+    host: str, port: int, user: str, password: str,
+    pid: str, exit_code_path: str, timeout_seconds: int,
+) -> dict:
+    """检查远端训练进程的运行状态。
+
+    通过一次 SSH 命令同时检查：
+    1. pid 是否仍然存活（kill -0）
+    2. exit_code_path 文件是否存在，若存在则读取 exit code
+
+    Returns:
+        {
+            "is_running": bool,
+            "has_exit_code": bool,
+            "exit_code": int | None,
+            "status": "running" | "completed" | "failed" | "unknown_failed"
+        }
+    """
+    cmd = (
+        f"ALIVE=0; kill -0 {pid} 2>/dev/null && ALIVE=1; "
+        f"EC=''; "
+        f"if [ -f {shlex.quote(exit_code_path)} ]; then "
+        f"  EC=$(cat {shlex.quote(exit_code_path)} 2>/dev/null | tr -d '[:space:]'); "
+        f"fi; "
+        f"echo \"___ALIVE___$ALIVE\"; "
+        f"echo \"___EC___$EC\""
+    )
+    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
+    if code != 0:
+        raise TailiCloudToolError(err or out)
+
+    is_running = False
+    exit_code_val: int | None = None
+    has_exit_code = False
+
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("___ALIVE___"):
+            is_running = line.replace("___ALIVE___", "") == "1"
+        elif line.startswith("___EC___"):
+            ec_str = line.replace("___EC___", "")
+            if ec_str:
+                has_exit_code = True
+                try:
+                    exit_code_val = int(ec_str)
+                except ValueError:
+                    exit_code_val = -1
+
+    # 状态推断
+    if has_exit_code:
+        status = "completed" if exit_code_val == 0 else "failed"
+    elif is_running:
+        status = "running"
+    else:
+        # pid 不存活、且没有 exit_code 文件 → 异常退出
+        status = "unknown_failed"
+
+    return {
+        "is_running": is_running,
+        "has_exit_code": has_exit_code,
+        "exit_code": exit_code_val,
+        "status": status,
+    }
 
 
 def fetch_remote_file(host: str, port: int, user: str, password: str, remote_path: str, local_path: str, timeout_seconds: int) -> dict[str, str]:
@@ -147,12 +230,42 @@ def fetch_remote_file(host: str, port: int, user: str, password: str, remote_pat
     return {"remote_path": remote_path, "local_path": local_path, "status": "downloaded"}
 
 
-def remote_tail_log(host: str, port: int, user: str, password: str, log_path: str, timeout_seconds: int) -> str:
-    cmd = f"python - <<'PY'\nfrom pathlib import Path\np = Path(r'''{log_path}''')\nprint(p.read_text(encoding='utf-8', errors='replace') if p.exists() else '')\nPY"
+def remote_tail_log(host: str, port: int, user: str, password: str, log_path: str, timeout_seconds: int, byte_offset: int = 0) -> tuple[str, int]:
+    """从远端日志文件增量读取内容。
+
+    Args:
+        byte_offset: 上一次读取结束时的字节位置。0 表示从头读取。
+
+    Returns:
+        (new_text, new_offset): 本次读到的新增文本和新的字节偏移量。
+        如果文件不存在或无新增，返回 ("", byte_offset)。
+    """
+    # 用 shell 命令获取文件大小并增量读取，避免嵌入式 Python 被 .bashrc 干扰。
+    # `wc -c < file` 获取字节数；`tail -c +{offset+1}` 从指定偏移开始读取。
+    cmd = (
+        f"test -f {shlex.quote(log_path)} || {{ echo '___NOFILE___'; exit 0; }}; "
+        f"SIZE=$(wc -c < {shlex.quote(log_path)}); "
+        f"echo \"___SIZE___$SIZE\"; "
+        f"if [ \"$SIZE\" -gt {byte_offset} ]; then "
+        f"  tail -c +{byte_offset + 1} {shlex.quote(log_path)}; "
+        f"fi"
+    )
     out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
     if code != 0:
         raise TailiCloudToolError(err or out)
-    return out
+
+    if "___NOFILE___" in out:
+        return ("", byte_offset)
+
+    # 解析文件大小
+    lines = out.split("\n", 1)
+    size_line = lines[0].strip()
+    new_text = lines[1] if len(lines) > 1 else ""
+    try:
+        new_offset = int(size_line.replace("___SIZE___", ""))
+    except ValueError:
+        new_offset = byte_offset + len(new_text.encode("utf-8", errors="replace"))
+    return (new_text, new_offset)
 
 
 def remote_kill_process(host: str, port: int, user: str, password: str, pid: str, timeout_seconds: int) -> None:

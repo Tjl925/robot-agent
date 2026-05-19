@@ -39,8 +39,16 @@ from robot_agent.schemas.state import (
 
 
 def load_config(path: Path) -> tuple[AutoDLConfig, TailiCloudConfig]:
+    import os
     raw = json.loads(path.read_text(encoding="utf-8"))
-    auto_cfg = AutoDLConfig(**raw["phase1"])
+    
+    # 优先从环境变量中读取 AutoDL Token，确保安全性
+    phase1 = raw.get("phase1", {})
+    env_token = os.getenv("AUTODL_TOKEN")
+    if env_token:
+        phase1["token"] = env_token
+        
+    auto_cfg = AutoDLConfig(**phase1)
     taili_cfg = TailiCloudConfig(**raw["phase2"])
     return auto_cfg, taili_cfg
 

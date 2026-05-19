@@ -45,16 +45,17 @@ from robot_agent.schemas.state import (
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
     STATE_P2_CONFIG_VERSION,
+    STATE_P2_EVAL_FAIL_REASONS,
     STATE_P2_EVAL_PASSED,
     STATE_P2_EVENTS,
     STATE_P2_FAILURE_REASON,
     STATE_P2_HITL_REASON,
     STATE_P2_HITL_REQUIRED,
     STATE_P2_ITER_MAX,
-    STATE_P2_EVAL_VIDEO_PATH,
     STATE_P2_ITER_ROUND,
     STATE_P2_STAGE,
     STATE_P2_STATUS,
+    STATE_P2_TRAIN_STATUS,
     STATE_P2_URDF_VALID,
     STATE_P2_URDF_RISK,
     Phase2Stage,
@@ -150,6 +151,41 @@ class TailiOrchestratorAgent(BaseAgent):
             yield event
         await self._commit_state(ctx)
 
+    def _format_debug_state(self, ctx: InvocationContext, label: str) -> str:
+        """格式化输出当前 session state 的关键 P2 字段，用于调试。"""
+        import json as _json
+        state = dict(ctx.session.state)
+        p2_state = {k: v for k, v in sorted(state.items()) if str(k).startswith("phase2.")}
+        header = f"\n{'='*60}\n[DEBUG] {label}\n{'='*60}"
+        body = _json.dumps(p2_state, ensure_ascii=False, indent=2, default=str)
+        footer = f"{'='*60}"
+        return f"{header}\n{body}\n{footer}"
+
+    # ====== 测试开关 ======
+    # 设为 True 可跳过步骤 1~4（URDF→配置→文件→发布），直接从训练开始。
+    DEBUG_SKIP_PRE_TRAIN: bool = False
+    # 设为 True 在视频评估前暂停，打印全量 state 到终端后立即 return。
+    DEBUG_STOP_BEFORE_VIDEO: bool = False
+
+    async def _handle_post_train(self, ctx: InvocationContext) -> None:
+        """训练结束后的统一状态处理。
+
+        根据 TrainAgent 写入的 STATE_P2_TRAIN_STATUS 决定后续路由：
+        - "completed":     训练正常结束且 play.py 渲染成功，等视频裁判来决定 EVAL_PASSED。
+        - "early_stopped":  日志裁判判定发散/崩溃，标记失败进入 Revise。
+        - "play_failed":    训练完成但 play.py 渲染失败，标记失败进入 Revise。
+        - "train_failed":   远端训练命令非零退出或异常退出，标记失败进入 Revise。
+        - "train_timeout":  训练超过 max_training_minutes 仍未结束，已强制终止，标记失败进入 Revise。
+        """
+        train_status = ctx.session.state.get(STATE_P2_TRAIN_STATUS, "completed")
+        # 只有 "completed" 才允许进入视频评估；其余状态一律标记失败。
+        if train_status != "completed":
+            ctx.session.state[STATE_P2_EVAL_PASSED] = False
+            fail_reasons = list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, []))
+            reason_text = "; ".join(str(r) for r in fail_reasons) if fail_reasons else f"训练未正常完成 (status={train_status})"
+            ctx.session.state[STATE_P2_HITL_REASON] = reason_text
+            await self._commit_state(ctx)
+
     @override
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         # 初始化 Phase-2 的关键状态。
@@ -173,84 +209,71 @@ class TailiOrchestratorAgent(BaseAgent):
         await self._commit_state(ctx)
 
         try:
-            # --- [TEST MODE] 跳过前三个步骤，直接测试上传 ---
-            # 1. 分析 URDF，得到可训练风险等级。
-            # async for event in self._run_step(ctx, self.analyze_urdf):
-            #     yield event
-            #     
-            # urdf_valid = ctx.session.state.get(STATE_P2_URDF_VALID, False)
-            # urdf_risk = ctx.session.state.get(STATE_P2_URDF_RISK, "high")
-            # if not urdf_valid or urdf_risk == "high":
-            #     ctx.session.state[STATE_P2_STATUS] = "failed"
-            #     ctx.session.state[STATE_P2_FAILURE_REASON] = f"URDF 诊断未通过或风险过高 (valid={urdf_valid}, risk={urdf_risk})，流程中止，请人工介入修复。"
-            #     yield self._yield_text(f"taili_orchestrator: {ctx.session.state[STATE_P2_FAILURE_REASON]}")
-            #     await self._commit_state(ctx)
-            #     return
-            #
-            # # 2. 第一次生成配置前，先让配置生成 Agent 产出一版草案。
-            # async for event in self._run_step(ctx, self.config_synthesis):
-            #     yield event
-            # # 3. 生成本地草案文件。
-            # async for event in self._run_step(ctx, self.generate_files):
-            #     yield event
-            # --- [TEST MODE END] ---
-            
-            # 4. 上传到云端，并准备远端执行。
-            async for event in self._run_step(ctx, self.publish_cloud):
-                yield event
-                
-            yield self._yield_text("taili_orchestrator: [TEST MODE] 仅测试 publish_cloud，已暂停后续流程。")
-            return
-            # 5. 启动训练任务。
+            if not self.DEBUG_SKIP_PRE_TRAIN:
+                # 1. 分析 URDF，得到可训练风险等级。
+                async for event in self._run_step(ctx, self.analyze_urdf):
+                    yield event
+
+                urdf_valid = ctx.session.state.get(STATE_P2_URDF_VALID, False)
+                urdf_risk = ctx.session.state.get(STATE_P2_URDF_RISK, "high")
+                if not urdf_valid or urdf_risk == "high":
+                    ctx.session.state[STATE_P2_STATUS] = "failed"
+                    ctx.session.state[STATE_P2_FAILURE_REASON] = f"URDF 诊断未通过或风险过高 (valid={urdf_valid}, risk={urdf_risk})，流程中止，请人工介入修复。"
+                    yield self._yield_text(f"taili_orchestrator: {ctx.session.state[STATE_P2_FAILURE_REASON]}")
+                    await self._commit_state(ctx)
+                    return
+
+                # 2. 生成配置草案。
+                async for event in self._run_step(ctx, self.config_synthesis):
+                    yield event
+                # 3. 生成本地发布文件。
+                async for event in self._run_step(ctx, self.generate_files):
+                    yield event
+                # 4. 上传到云端。
+                async for event in self._run_step(ctx, self.publish_cloud):
+                    yield event
+            else:
+                yield self._yield_text("[DEBUG] 跳过步骤 1~4，直接进入训练")
+
+            # 5. 启动训练 → 根据 TRAIN_STATUS 路由后续动作。
             async for event in self._run_step(ctx, self.train):
                 yield event
-            if bool(ctx.session.state.get("phase2.train.should_stop", False)):
-                ctx.session.state["phase2.train.should_stop"] = False
-                if bool(ctx.session.state.get("phase2.train.converged", False)):
-                    # 训练已收敛，TrainAgent 已设置 EVAL_PASSED=True，进入视频评估确认。
-                    ctx.session.state[STATE_P2_STAGE] = Phase2Stage.EVALUATE_VIDEO
-                    await self._commit_state(ctx)
-                    async for event in self._run_step(ctx, self.evaluate_video):
-                        yield event
-                else:
-                    # 训练失败早停，进入修订流程。
-                    ctx.session.state[STATE_P2_EVAL_PASSED] = False
-                    ctx.session.state[STATE_P2_HITL_REQUIRED] = False
-                    ctx.session.state[STATE_P2_HITL_REASON] = "训练日志评估建议早停"
-                    await self._commit_state(ctx)
-                    yield self._yield_text("taili_phase2: 训练失败早停，进入修订流程")
-            else:
-                # 6. 训练完整结束后播放视频并交给视频裁判。
-                ctx.session.state[STATE_P2_STAGE] = Phase2Stage.EVALUATE_VIDEO
-                ctx.session.state[STATE_P2_EVAL_VIDEO_PATH] = str(Path(self.cfg.cloud_robot_lab_root) / "videos" / self.cfg.video_output_name)
-                await self._commit_state(ctx)
+            await self._handle_post_train(ctx)
+
+            # 6. 如果训练完成（非 early_stopped / play_failed），进入视频评估。
+            if ctx.session.state.get(STATE_P2_TRAIN_STATUS) == "completed":
+                if self.DEBUG_STOP_BEFORE_VIDEO:
+                    yield self._yield_text(self._format_debug_state(ctx, "收敛或训练完，视频评估前断点"))
+                    return
                 async for event in self._run_step(ctx, self.evaluate_video):
                     yield event
+            
+            yield self._yield_text(self._format_debug_state(ctx, "失败早停或视频渲染失败，revise迭代前断点"))
+            return
 
             # 7. 如果没通过，进入 revise 迭代，直到达到最大自动轮数。
             while not bool(ctx.session.state.get(STATE_P2_EVAL_PASSED, False)) and int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)) < int(ctx.session.state.get(STATE_P2_ITER_MAX, self.cfg.max_auto_iterations)):
-                failure_reasons = list(ctx.session.state.get("phase2.eval.gate_failed_reasons", []))
+                failure_reasons = list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, []))
                 reason = "; ".join(str(item) for item in failure_reasons) if failure_reasons else str(ctx.session.state.get(STATE_P2_HITL_REASON, "revise"))
                 await self._append_config_revision(ctx, reason=reason)
                 async for event in self._run_step(ctx, self.repair):
                     yield event
                 async for event in self._run_step(ctx, self.config_synthesis):
                     yield event
-                # 关键：revise 后必须重新生成本地发布文件，否则上传到云端的仍是旧配置。
                 async for event in self._run_step(ctx, self.generate_files):
                     yield event
                 async for event in self._run_step(ctx, self.publish_cloud):
                     yield event
                 async for event in self._run_step(ctx, self.train):
                     yield event
-                # 注意：train 内部已在训练轮询中执行了日志评估（EvaluateTailiTrainingLogAgent），
-                # 不需要在此重复调用。直接检查 should_stop 标志。
-                if bool(ctx.session.state.get("phase2.train.should_stop", False)):
-                    # 重置标志，避免影响可能的下一轮迭代。
-                    ctx.session.state["phase2.train.should_stop"] = False
-                    continue
-                async for event in self._run_step(ctx, self.evaluate_video):
-                    yield event
+                await self._handle_post_train(ctx)
+                # 只有训练完成才进视频评估；early_stopped / play_failed 直接回到 while 顶部。
+                if ctx.session.state.get(STATE_P2_TRAIN_STATUS) == "completed":
+                    if self.DEBUG_STOP_BEFORE_VIDEO:
+                        yield self._yield_text(self._format_debug_state(ctx, "revise 后视频评估前断点"))
+                        return
+                    async for event in self._run_step(ctx, self.evaluate_video):
+                        yield event
 
             # 8. 自动迭代结束后仍不通过，则进入 HITL。
             if not bool(ctx.session.state.get(STATE_P2_EVAL_PASSED, False)):
