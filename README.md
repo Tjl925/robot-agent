@@ -5,7 +5,7 @@
 ---
 
 ## 1. 核心设计原则
-1. **单入口与单主线**：统一由 `run.py` 启动；专一服务于本地 `taili_quad/` -> 云端 `robot_lab/` 唯一主线。
+1. **单入口与单主线**：统一由 `main.py` 启动；专一服务于本地 `taili_quad/` -> 云端 `robot_lab/` 唯一主线。
 2. **LLM 思考，代码执行**：LLM 仅负责复杂的逻辑推理与趋势诊断（输出严格 JSON），繁琐的流程流转、文件生成与 SFTP 同步由代码确定性处理。
 3. **记忆瘦身与物理隔离**：多轮修订历史仅保存极简的文本摘要以杜绝 Token 爆炸。在修订模式 (`revise`) 下，Agent 直接从本地磁盘读取实际生成的 Python 代码喂给 LLM，保证上下文的 100% 精准与高性价比。
 4. **100% 常量化管理**：所有跨 Agent 传输的状态键定义于 `state.py`，代码中无任何硬编码字符串键，彻底消除了拼写隐患。
@@ -23,7 +23,7 @@ cp configs/unified.example.json configs/unified.json
 
 ### 2.2 启动流程
 ```bash
-python run.py --config configs/unified.json
+python main.py --config configs/unified.json
 ```
 
 ---
@@ -65,7 +65,6 @@ D:\robot_agent
 │     └─ tools/
 │        ├─ ssh_client.py          # SSH 命令执行客户端
 │        └─ taili_cloud.py         # SFTP 传输与增量日志核心工具
-├─ run.py                    # 唯一执行入口
-├─ requirements.txt          # 项目依赖
+├─ main.py                    # 唯一执行入口
 └─ PROJECT_SUMMARY.md        # 系统核心架构与痛点攻克记录
 ```
