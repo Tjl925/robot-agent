@@ -1,8 +1,15 @@
-robot_lab/
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
 taili_quad/
-.deepseek/
 .vscode/
 .idea/
 .env
-__pycache__/
-TESTING_PROGRESS.md

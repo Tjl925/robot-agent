@@ -10,22 +10,19 @@
   "phase2": {
     "local_robot_root": "taili_quad",
     "cloud_robot_lab_root": "/root/autodl-tmp/robot_lab",
-    "cloud_asset_path": "source/robot_lab/robot_lab/assets/taili_quad.py",
+    "cloud_asset_path": "source/robot_lab/robot_lab/assets/taiLi_quad.py",
     "cloud_task_cfg_root": "source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad",
     "remote_timeout_seconds": 60,
     "task_name": "RobotLab-Isaac-Velocity-Flat-Taili-Quad-v0",
-    "train_command_template": "cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless",
-    "play_command_template": "cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video",
+    "train_command_template": "eval \"$(conda shell.bash hook)\" && conda activate isaac_lab && cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless",
+    "play_command_template": "eval \"$(conda shell.bash hook)\" && conda activate isaac_lab && cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video --video_length=1000 --enable_camera",
     "play_num_envs": null,
     "play_timeout_seconds": 600,
     "eval_log_root": "/root/autodl-tmp/robot_lab/logs/rsl_rl",
     "max_training_iterations": 1000,
     "eval_check_interval": 100,
     "eval_sample_window_size": 5,
-
-
     "max_auto_iterations": 2,
-
     "max_training_minutes": 240,
     "hitl_response_text": null,
     "eval_metric_specs": [

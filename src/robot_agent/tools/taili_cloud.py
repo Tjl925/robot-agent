@@ -123,72 +123,71 @@ def remote_list_latest_run(host: str, port: int, user: str, password: str, root:
 
 
 def start_remote_training(host: str, port: int, user: str, password: str, command: str, timeout_seconds: int) -> dict[str, str]:
-    """在远端异步启动训练命令。
+    """在远端通过 tmux 会话异步启动训练命令。
 
-    会为本次训练生成唯一 run_id，训练命令退出后将 exit code 写入文件，
-    便于后续通过 remote_check_training_status 判断训练是否正常结束。
+    为本次训练生成唯一 run_id 和 tmux session，训练命令通过 tee 同时输出到
+    终端（tmux 窗口）和日志文件，训练退出后写入 exit_code 文件。
+    用户可随时 `tmux attach -t <session_name>` 查看实时输出。
 
     Returns:
-        {"pid": str, "log_path": str, "exit_code_path": str, "run_id": str}
+        {"session_name": str, "log_path": str, "exit_code_path": str, "run_id": str}
     """
     run_id = uuid.uuid4().hex[:12]
-    log_path = f"/tmp/taili_train_{run_id}.log"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    session_name = f"taili_{run_id}"
+    log_path = f"/tmp/taili_train_{run_id}_{timestamp}.log"
     exit_code_path = f"/tmp/taili_train_{run_id}.exit_code"
 
-    # 包装命令：训练结束后写入 exit code 文件
-    wrapped = (
-        f"( bash -lc {shlex.quote(command)}; "
-        f"echo $? > {shlex.quote(exit_code_path)} "
-        f") > {shlex.quote(log_path)} 2>&1 < /dev/null & echo $!"
+    # 在 tmux 内执行的完整命令：训练 + tee 双写 + 写入 exit_code
+    inner_cmd = (
+        f"bash -lc {shlex.quote(command)} 2>&1 | tee {shlex.quote(log_path)}; "
+        f"echo ${{PIPESTATUS[0]}} > {shlex.quote(exit_code_path)}"
     )
-    out, err, code = execute_ssh_command(host, port, user, password, wrapped, timeout_seconds)
+    # 清理同名旧会话 → 创建新会话 → 发送训练命令
+    setup_cmd = (
+        f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null || true; "
+        f"tmux new-session -d -s {shlex.quote(session_name)}; "
+        f"tmux send-keys -t {shlex.quote(session_name)} {shlex.quote(inner_cmd)} Enter"
+    )
+    out, err, code = execute_ssh_command(host, port, user, password, setup_cmd, timeout_seconds)
     if code != 0:
-        raise TailiCloudToolError(err or out)
-    pid = out.strip()
-    if not pid:
-        raise TailiCloudToolError("远端训练启动失败：未返回 PID")
-    return {"pid": pid, "log_path": log_path, "exit_code_path": exit_code_path, "run_id": run_id}
+        raise TailiCloudToolError(f"tmux 训练会话创建失败: {err or out}")
+    return {"session_name": session_name, "log_path": log_path, "exit_code_path": exit_code_path, "run_id": run_id}
 
 
 def remote_check_training_status(
     host: str, port: int, user: str, password: str,
-    pid: str, exit_code_path: str, timeout_seconds: int,
+    session_name: str, exit_code_path: str, timeout_seconds: int,
 ) -> dict:
-    """检查远端训练进程的运行状态。
+    """检查远端训练状态（基于 tmux 会话）。
 
-    通过一次 SSH 命令同时检查：
-    1. pid 是否仍然存活（kill -0）
-    2. exit_code_path 文件是否存在，若存在则读取 exit code
+    一次 SSH 同时检查：
+    1. tmux session 是否仍然存在
+    2. exit_code_path 是否已写入
 
     Returns:
-        {
-            "is_running": bool,
-            "has_exit_code": bool,
-            "exit_code": int | None,
-            "status": "running" | "completed" | "failed" | "unknown_failed"
-        }
+        {"session_alive": bool, "has_exit_code": bool,
+         "exit_code": int | None, "status": str}
     """
     cmd = (
-        f"ALIVE=0; kill -0 {pid} 2>/dev/null && ALIVE=1; "
+        f"SA=0; tmux has-session -t {shlex.quote(session_name)} 2>/dev/null && SA=1; "
         f"EC=''; "
         f"if [ -f {shlex.quote(exit_code_path)} ]; then "
         f"  EC=$(cat {shlex.quote(exit_code_path)} 2>/dev/null | tr -d '[:space:]'); "
         f"fi; "
-        f"echo \"___ALIVE___$ALIVE\"; "
-        f"echo \"___EC___$EC\""
+        f"echo \"___SA___$SA\"; echo \"___EC___$EC\""
     )
     out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
     if code != 0:
         raise TailiCloudToolError(err or out)
 
-    is_running = False
+    session_alive = False
     exit_code_val: int | None = None
     has_exit_code = False
-
     for line in out.splitlines():
         line = line.strip()
-        if line.startswith("___ALIVE___"):
-            is_running = line.replace("___ALIVE___", "") == "1"
+        if line.startswith("___SA___"):
+            session_alive = line.replace("___SA___", "") == "1"
         elif line.startswith("___EC___"):
             ec_str = line.replace("___EC___", "")
             if ec_str:
@@ -198,21 +197,14 @@ def remote_check_training_status(
                 except ValueError:
                     exit_code_val = -1
 
-    # 状态推断
     if has_exit_code:
         status = "completed" if exit_code_val == 0 else "failed"
-    elif is_running:
+    elif session_alive:
         status = "running"
     else:
-        # pid 不存活、且没有 exit_code 文件 → 异常退出
         status = "unknown_failed"
 
-    return {
-        "is_running": is_running,
-        "has_exit_code": has_exit_code,
-        "exit_code": exit_code_val,
-        "status": status,
-    }
+    return {"session_alive": session_alive, "has_exit_code": has_exit_code, "exit_code": exit_code_val, "status": status}
 
 
 def fetch_remote_file(host: str, port: int, user: str, password: str, remote_path: str, local_path: str, timeout_seconds: int) -> dict[str, str]:
@@ -268,11 +260,71 @@ def remote_tail_log(host: str, port: int, user: str, password: str, log_path: st
     return (new_text, new_offset)
 
 
-def remote_kill_process(host: str, port: int, user: str, password: str, pid: str, timeout_seconds: int) -> None:
-    cmd = f"kill -TERM {pid} || true"
-    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
-    if code != 0:
-        raise TailiCloudToolError(err or out)
+def remote_kill_training(host: str, port: int, user: str, password: str, session_name: str, timeout_seconds: int) -> None:
+    """终止远端训练 tmux 会话（会杀死会话内所有进程）。"""
+    cmd = f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null || true"
+    execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
+
+
+def remote_execute_play_in_tmux(
+    host: str, port: int, user: str, password: str,
+    session_name: str, play_command: str, timeout_seconds: int,
+    poll_interval: int = 10,
+) -> tuple[str, int]:
+    """在 tmux 会话中执行 play.py 并轮询等待完成。
+
+    如果训练会话仍存在则复用，否则新建同名会话。
+    play 的输出同样通过 tee 双写到终端和日志文件。
+    执行结束后自动 kill 会话，防止下一轮 Revise 时名称冲突。
+
+    Returns:
+        (play_stdout, play_exit_code)
+    """
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_tag = session_name.replace("taili_", "")
+    play_log = f"/tmp/taili_play_{run_tag}_{timestamp}.log"
+    play_ec = f"/tmp/taili_play_{run_tag}.exit_code"
+
+    # 确保会话存在 + 清理旧 exit_code
+    ensure = (
+        f"tmux has-session -t {shlex.quote(session_name)} 2>/dev/null || "
+        f"tmux new-session -d -s {shlex.quote(session_name)}; "
+        f"rm -f {shlex.quote(play_ec)}"
+    )
+    execute_ssh_command(host, port, user, password, ensure, timeout_seconds)
+
+    # 发送 play 命令
+    inner = (
+        f"bash -lc {shlex.quote(play_command)} 2>&1 | tee {shlex.quote(play_log)}; "
+        f"echo ${{PIPESTATUS[0]}} > {shlex.quote(play_ec)}"
+    )
+    send = f"tmux send-keys -t {shlex.quote(session_name)} {shlex.quote(inner)} Enter"
+    execute_ssh_command(host, port, user, password, send, timeout_seconds)
+
+    # 轮询等待 play 完成
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        chk = f"cat {shlex.quote(play_ec)} 2>/dev/null || echo '___NOTDONE___'"
+        out, _, _ = execute_ssh_command(host, port, user, password, chk, 30)
+        out = out.strip()
+        if out and out != "___NOTDONE___":
+            try:
+                exit_code = int(out)
+            except ValueError:
+                exit_code = -1
+            # 读取 play 输出日志
+            log_out, _, _ = execute_ssh_command(
+                host, port, user, password,
+                f"cat {shlex.quote(play_log)} 2>/dev/null", 60,
+            )
+            # 清理会话
+            remote_kill_training(host, port, user, password, session_name, timeout_seconds)
+            return (log_out, exit_code)
+
+    # 超时：kill 会话并报错
+    remote_kill_training(host, port, user, password, session_name, timeout_seconds)
+    raise TailiCloudToolError(f"play.py 在 {timeout_seconds}s 内未完成")
 
 
 def remote_find_latest_video_file(host: str, port: int, user: str, password: str, run_root: str, timeout_seconds: int) -> str:

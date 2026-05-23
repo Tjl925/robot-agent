@@ -163,9 +163,9 @@ class TailiOrchestratorAgent(BaseAgent):
 
     # ====== 测试开关 ======
     # 设为 True 可跳过步骤 1~4（URDF→配置→文件→发布），直接从训练开始。
-    DEBUG_SKIP_PRE_TRAIN: bool = False
+    DEBUG_SKIP_PRE_TRAIN: bool = True
     # 设为 True 在视频评估前暂停，打印全量 state 到终端后立即 return。
-    DEBUG_STOP_BEFORE_VIDEO: bool = False
+    DEBUG_STOP_BEFORE_VIDEO: bool = True
 
     async def _handle_post_train(self, ctx: InvocationContext) -> None:
         """训练结束后的统一状态处理。
