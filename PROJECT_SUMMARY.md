@@ -34,7 +34,7 @@
 | **PublishTailiWorkspaceStepAgent** | 确定性云端发布 | 递归扫描本地资产，在云端按原相对结构动态建树，并通过 SFTP 部署全部资产。 |
 | **TrainTailiStepAgent** | 训练监控与早停控制 | 远端异步启动训练，提取增量日志，定期提取 checkpoint 指标，并在日志裁判建议早停时强行中止。最后渲染视频。 |
 | **EvaluateTailiTrainingLogAgent** | 日志采样趋势裁判 | 接收 `metric_history` 指标趋势，进行单次无状态判断。输出 `TailiTrainingLogJudgeResult`。 |
-| **EvaluateTailiVideoAgent** | 视频终审裁判 | 下载远端评估视频，进行最终视觉通过判定。输出 `TailiVideoJudgeResult`。 |
+| **EvaluateTailiVideoAgent** | 视频终审裁判 | 下载远端评估视频，调用 Qwen3.6-Plus 多模态视觉模型，将 MP4 转 Base64 传入进行真实的物理形态打分。输出 `TailiVideoJudgeResult`。 |
 | **RepairTailiWorkflowStepAgent** | 故障自愈迭代控制器 | 收集上一轮失败原因，更新迭代轮次，为下一轮配置 Revise 做准备。 |
 | **ArchiveTailiOutputsStepAgent** | 成果归档器 | 评估通过后，将最终配置路径与得分归档至 `STATE_P2_ARCHIVE_SUMMARY`。 |
 
@@ -60,6 +60,14 @@
 
 ### 4.5 规范级：100% 常量化与零硬编码
 - 彻底清理了 `state.py` 中 14 个冗余废弃状态键，新增 13 个专用常量，并把 `taili_steps.py` 和 `taili_orchestrator.py` 中的所有硬编码 `"phase2.train.xxx"` 字符串替换为统一常量，消除了拼写隐患。
+
+### 4.6 架构级：多模型混合协同 (DeepSeek + Qwen-VL)
+- **痛点**：视频评估阶段如果仅靠退出码或数值日志，无法真正验收“动作是否优雅、是否失真”。但纯文本大模型（如 DeepSeek-v4-pro）不具备视频理解能力。
+- **解决**：打破单一模型局限。基础的底层逻辑推理、配置生成与高维日志监控由最强的 `deepseek-v4-pro` 负责；而针对视频评估阶段，则动态按需实例化 `qwen3.6-plus`（多模态模型），并在代码层实现本地 MP4 文件到 Base64 的无缝转换与组装，从而赋予系统真正的“视觉”。
+
+### 4.7 规范级：输入输出 Schema 与状态字典的终极瘦身
+- **痛点**：早期大模型结构化输出带有大量的历史包袱字段（如 `reasons: list`, `confidence`, `evidence_mode`, `next_action` 等），这些字段在硬编码路由体系中毫无作用，且增加了状态拼接处理的恶心程度。
+- **解决**：彻底打通 Pydantic Schema、Agent Instruction Prompt 与 Orchestrator 状态转移字典的“任督二脉”。所有判定结构的评价理由全部强制收敛为单一的 `reason: str`。消灭了毫无意义的打分与路由字段，让逻辑变得极度精简纯粹。
 
 ---
 

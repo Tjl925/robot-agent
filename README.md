@@ -9,7 +9,8 @@
 1. **单入口与单主线**：统一由 `main.py` 启动；专一服务于本地 `taili_quad/` → 云端 `robot_lab/` 唯一主线。
 2. **LLM 思考，代码执行**：LLM 仅负责复杂的逻辑推理与趋势诊断（输出严格 JSON），繁琐的流程流转、文件生成与 SFTP 同步由代码确定性处理。
 3. **记忆瘦身与物理隔离**：多轮修订历史仅保存极简的文本摘要以杜绝 Token 爆炸。在修订模式 (`revise`) 下，Agent 直接从本地磁盘读取实际生成的 Python 代码喂给 LLM，保证上下文的 100% 精准与高性价比。
-4. **100% 常量化管理**：所有跨 Agent 传输的状态键定义于 `state.py`，代码中无任何硬编码字符串键，彻底消除了拼写隐患。
+4. **多模型混合协同 (Mixture of Models)**：按任务边界精细分配算力。代码生成与数据趋势判断由逻辑最强的 DeepSeek 负责，而视频验收阶段则动态切入支持视觉输入的 Qwen-VL 模型。
+5. **100% 常量化管理**：所有跨 Agent 传输的状态键定义于 `state.py`，代码中无任何硬编码字符串键，彻底消除了拼写隐患。
 
 ---
 
@@ -46,8 +47,6 @@ GOOGLE_API_KEY=your_google_api_key
 # ... 其他需要的 key
 ```
 
-> **注意**：`.env` 已加入 `.gitignore`，不会被提交到版本库。`main.py` 启动时会通过 `python-dotenv` 自动加载。
-
 ### 3.3 配置文件
 
 复制并修改配置模板：
@@ -68,13 +67,11 @@ cp configs/unified.example.json configs/unified.json
 | `phase2.play_timeout_seconds` | 视频渲染超时（默认 600s，勿使用默认 60s） |
 | `phase2.max_auto_iterations` | 最大自动迭代轮次 |
 | `phase2.max_training_minutes` | 单轮训练最大时长（分钟） |
-| `phase2.eval_metric_specs` | 指标评估规格（名称、方向、权重） |
-| `phase2.eval_early_stop_rules` | 早停规则定义 |
 
 ### 3.4 启动
 
-```bash
-python main.py --config configs/unified.json
+```cmd
+uv run main.py --config configs/unified.json
 ```
 
 ---
@@ -106,6 +103,8 @@ Phase 1 (云端就绪)               Phase 2 (部署训练闭环)
 | `early_stopped` | 日志裁判判定发散/崩溃 | 强制杀死远端进程，跳过视频，直接进入 Revise |
 | `completed` | 训练正常完成或收敛 | 自动触发 `play.py` 渲染评估视频，流转至视频裁判 |
 | `play_failed` | 训练已完成但视频渲染报错 | 拦截熔断，跳过视频评估，直接进入 Revise |
+| `train_failed` | 远端训练命令非零退出或异常退出 | 标记失败进入 Revise |
+| `train_timeout` | 训练超过 max_training_minutes 仍未结束 | 已强制终止，标记失败进入 Revise |
 
 ---
 
@@ -134,7 +133,7 @@ Phase 1 (云端就绪)               Phase 2 (部署训练闭环)
 |---|---|
 | **`TrainTailiStepAgent`** | 远端异步启动训练，byte-offset 增量日志拉取，定期采样 Checkpoint 投喂裁判，发散时强制早停，训练后自动渲染视频 |
 | **`EvaluateTailiTrainingLogAgent`** | 日志裁判：对 Checkpoint 指标趋势做单次无状态判定（`continue` / `stop_failed` / `stop_converged`） |
-| **`EvaluateTailiVideoAgent`** | 视频裁判：下载远端评估视频，基于 LLM 做最终通过/不通过判定 |
+| **`EvaluateTailiVideoAgent`** | 视频裁判：下载远端评估视频，调用 **Qwen3.6-Plus 多模态模型**进行真实的物理形态打分，基于视频动作给出最终判定 |
 
 ### 迭代与归档
 
@@ -206,12 +205,11 @@ D:\robot_agent
 
 ### 7.4 调试开关
 
-编排器内置两个类级测试开关：
+编排器内置类级测试开关：
 
 | 开关 | 作用 |
 |---|---|
 | `DEBUG_SKIP_PRE_TRAIN` | 跳过 URDF 分析、配置生成、文件落盘与云端同步，直接从训练启动开始（适用于云端已就绪的场景） |
-| `DEBUG_STOP_BEFORE_VIDEO` | 训练完毕后暂停，在终端美化打印全量 `phase2.*` 状态字典，方便进入视频评估前的终期校验 |
 
 ---
 

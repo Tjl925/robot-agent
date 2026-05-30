@@ -94,6 +94,32 @@ async def run_all(auto_cfg: AutoDLConfig, taili_cfg: TailiCloudConfig) -> dict:
     return dict(final_session.state if final_session else {})
 
 
+def format_final_state(state: dict) -> dict:
+    """对最终输出的状态进行过滤与精简，防止超大字段打爆终端，支持用户后续自由增删。"""
+    omit_keys = {
+        "phase2.train.metric_history",
+        "phase2.config.generated_text",
+        "phase2.video.input_payload",
+        "phase2.video.judge_result",
+        "phase2.play.stdout",
+    }
+    
+    formatted = {}
+    for k, v in sorted(state.items()):
+        if k in omit_keys:
+            if isinstance(v, list):
+                formatted[k] = f"<list of length {len(v)} omitted>"
+            elif isinstance(v, dict):
+                formatted[k] = f"<dict keys {list(v.keys())} omitted>"
+            elif isinstance(v, str):
+                formatted[k] = f"<str of length {len(v)} omitted>"
+            else:
+                formatted[k] = f"<{type(v).__name__} omitted>"
+        else:
+            formatted[k] = v
+    return formatted
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Phase1 + Phase2 orchestrator")
     parser.add_argument("--config", required=True, help="Path to unified config json")
@@ -101,7 +127,10 @@ def main() -> None:
 
     auto_cfg, taili_cfg = load_config(Path(args.config))
     final_state = asyncio.run(run_all(auto_cfg, taili_cfg))
-    print(json.dumps(final_state, ensure_ascii=False, indent=2, default=str))
+    
+    # 优雅过滤并格式化输出
+    clean_state = format_final_state(final_state)
+    print(json.dumps(clean_state, ensure_ascii=False, indent=2, default=str))
 
 
 if __name__ == "__main__":

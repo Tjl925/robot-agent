@@ -109,7 +109,7 @@ STATE_P2_EVAL_VIDEO_PATH = "phase2.eval.video_path"
 STATE_P2_EVAL_VIDEO_REMOTE_PATH = "phase2.video.remote_path"
 STATE_P2_EVAL_PASSED = "phase2.eval.passed"
 STATE_P2_EVAL_SCORE = "phase2.eval.score_card"
-STATE_P2_EVAL_FAIL_REASONS = "phase2.eval.fail_reasons"
+STATE_P2_EVAL_FAIL_REASON = "phase2.eval.fail_reason"
 STATE_P2_VIDEO_INPUT_PAYLOAD = "phase2.video.input_payload"
 STATE_P2_VIDEO_JUDGE_RESULT = "phase2.video.judge_result"
 

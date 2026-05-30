@@ -122,32 +122,56 @@ def remote_list_latest_run(host: str, port: int, user: str, password: str, root:
     return out.strip()
 
 
-def start_remote_training(host: str, port: int, user: str, password: str, command: str, timeout_seconds: int) -> dict[str, str]:
+def start_remote_training(host: str, port: int, user: str, password: str, command: str, tmp_dir: str, timeout_seconds: int) -> dict[str, str]:
     """在远端通过 tmux 会话异步启动训练命令。
 
-    为本次训练生成唯一 run_id 和 tmux session，训练命令通过 tee 同时输出到
-    终端（tmux 窗口）和日志文件，训练退出后写入 exit_code 文件。
-    用户可随时 `tmux attach -t <session_name>` 查看实时输出。
+    为规避超长命令行和重定向管道在多层 shell/tmux 间转义解析错位的问题，
+    本方法在远端动态生成一个确定性的 bash 启动脚本并执行。
+    训练结束后会自动写入 exit_code 并销毁会话。
 
     Returns:
         {"session_name": str, "log_path": str, "exit_code_path": str, "run_id": str}
     """
     run_id = uuid.uuid4().hex[:12]
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     session_name = f"taili_{run_id}"
-    log_path = f"/tmp/taili_train_{run_id}_{timestamp}.log"
-    exit_code_path = f"/tmp/taili_train_{run_id}.exit_code"
 
-    # 在 tmux 内执行的完整命令：训练 + tee 双写 + 写入 exit_code
-    inner_cmd = (
-        f"bash -lc {shlex.quote(command)} 2>&1 | tee {shlex.quote(log_path)}; "
-        f"echo ${{PIPESTATUS[0]}} > {shlex.quote(exit_code_path)}"
+    # 在项目内 tmp 目录下以 timestamp 划分干净独立的归档子文件夹，使每次训练证据完全隔离
+    run_tmp_dir = f"{tmp_dir}/{timestamp}"
+    log_path = f"{run_tmp_dir}/taili_train_{run_id}.log"
+    exit_code_path = f"{run_tmp_dir}/taili_train_{run_id}.exit_code"
+    script_path = f"{run_tmp_dir}/taili_run_{run_id}.sh"
+
+    # 构建启动脚本内容，先强行 mkdir -p 创建该时间戳子目录，确保重定向 100% 成功
+    script_content = (
+        f"#!/bin/bash\n"
+        f"mkdir -p {shlex.quote(run_tmp_dir)}\n"
+        f"{command} 2>&1 | tee {shlex.quote(log_path)}\n"
+        f"echo ${{PIPESTATUS[0]}} > {shlex.quote(exit_code_path)}\n"
+        f"rm -f \"$0\"\n"
+        f"exit\n"
     )
-    # 清理同名旧会话 → 创建新会话 → 发送训练命令
+
+    # 写入脚本前，优先强行通过 SSH 执行一次 mkdir -p 确保时间戳父目录存在，否则 heredoc 写入会因目录缺失报错
+    mkdir_cmd = f"mkdir -p {shlex.quote(run_tmp_dir)}"
+    execute_ssh_command(host, port, user, password, mkdir_cmd, timeout_seconds)
+
+    # 使用 heredoc 写入远端脚本并赋予执行权限
+    write_cmd = (
+        f"cat << 'EOF' > {shlex.quote(script_path)}\n"
+        f"{script_content}"
+        f"EOF\n"
+        f"chmod +x {shlex.quote(script_path)}"
+    )
+    out, err, code = execute_ssh_command(host, port, user, password, write_cmd, timeout_seconds)
+    if code != 0:
+        raise TailiCloudToolError(f"远端训练启动脚本创建失败: {err or out}")
+
+    # 清理同名旧会话 → 创建新会话 → 发送简洁明了的脚本执行命令
     setup_cmd = (
         f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null || true; "
         f"tmux new-session -d -s {shlex.quote(session_name)}; "
-        f"tmux send-keys -t {shlex.quote(session_name)} {shlex.quote(inner_cmd)} Enter"
+        f"tmux send-keys -t {shlex.quote(session_name)} 'bash {script_path}' Enter"
     )
     out, err, code = execute_ssh_command(host, port, user, password, setup_cmd, timeout_seconds)
     if code != 0:
@@ -268,7 +292,7 @@ def remote_kill_training(host: str, port: int, user: str, password: str, session
 
 def remote_execute_play_in_tmux(
     host: str, port: int, user: str, password: str,
-    session_name: str, play_command: str, timeout_seconds: int,
+    session_name: str, play_command: str, tmp_dir: str, timeout_seconds: int,
     poll_interval: int = 10,
 ) -> tuple[str, int]:
     """在 tmux 会话中执行 play.py 并轮询等待完成。
@@ -280,10 +304,37 @@ def remote_execute_play_in_tmux(
     Returns:
         (play_stdout, play_exit_code)
     """
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     run_tag = session_name.replace("taili_", "")
-    play_log = f"/tmp/taili_play_{run_tag}_{timestamp}.log"
-    play_ec = f"/tmp/taili_play_{run_tag}.exit_code"
+    
+    # 隔离归档子目录
+    run_tmp_dir = f"{tmp_dir}/{timestamp}"
+    play_log = f"{run_tmp_dir}/taili_play_{run_tag}.log"
+    play_ec = f"{run_tmp_dir}/taili_play_{run_tag}.exit_code"
+    script_path = f"{run_tmp_dir}/taili_play_{run_tag}.sh"
+
+    # 构建并写入确定性的 play.py 执行脚本以规避复杂命令行嵌套转义隐患，先强行创建时间戳目录并在完成后自毁
+    script_content = (
+        f"#!/bin/bash\n"
+        f"mkdir -p {shlex.quote(run_tmp_dir)}\n"
+        f"{play_command} 2>&1 | tee {shlex.quote(play_log)}\n"
+        f"echo ${{PIPESTATUS[0]}} > {shlex.quote(play_ec)}\n"
+        f"rm -f \"$0\"\n"
+        f"exit\n"
+    )
+
+    # 写入脚本前，优先强行通过 SSH 执行一次 mkdir -p 确保时间戳目录存在
+    mkdir_cmd = f"mkdir -p {shlex.quote(run_tmp_dir)}"
+    execute_ssh_command(host, port, user, password, mkdir_cmd, timeout_seconds)
+
+    # 写入并赋予执行权限
+    write_cmd = (
+        f"cat << 'EOF' > {shlex.quote(script_path)}\n"
+        f"{script_content}"
+        f"EOF\n"
+        f"chmod +x {shlex.quote(script_path)}"
+    )
+    execute_ssh_command(host, port, user, password, write_cmd, timeout_seconds)
 
     # 确保会话存在 + 清理旧 exit_code
     ensure = (
@@ -293,12 +344,8 @@ def remote_execute_play_in_tmux(
     )
     execute_ssh_command(host, port, user, password, ensure, timeout_seconds)
 
-    # 发送 play 命令
-    inner = (
-        f"bash -lc {shlex.quote(play_command)} 2>&1 | tee {shlex.quote(play_log)}; "
-        f"echo ${{PIPESTATUS[0]}} > {shlex.quote(play_ec)}"
-    )
-    send = f"tmux send-keys -t {shlex.quote(session_name)} {shlex.quote(inner)} Enter"
+    # 发送脚本执行指令
+    send = f"tmux send-keys -t {shlex.quote(session_name)} 'bash {script_path}' Enter"
     execute_ssh_command(host, port, user, password, send, timeout_seconds)
 
     # 轮询等待 play 完成
@@ -318,11 +365,11 @@ def remote_execute_play_in_tmux(
                 host, port, user, password,
                 f"cat {shlex.quote(play_log)} 2>/dev/null", 60,
             )
-            # 清理会话
+            # 清理会话，临时生成的脚本由其自身运行的 rm -f "$0" 机制在 tmux 退出时自动清扫
             remote_kill_training(host, port, user, password, session_name, timeout_seconds)
             return (log_out, exit_code)
 
-    # 超时：kill 会话并报错
+    # 超时：kill 会话并报错，临时生成的脚本由其内部自毁处理
     remote_kill_training(host, port, user, password, session_name, timeout_seconds)
     raise TailiCloudToolError(f"play.py 在 {timeout_seconds}s 内未完成")
 

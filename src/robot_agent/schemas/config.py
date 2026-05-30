@@ -72,6 +72,8 @@ class TailiCloudConfig(BaseModel):
     local_robots_subdir: str = Field(default="urdf", description="本地机器人 URDF 子目录")
     # 云端 robot_lab 根目录（固定路径）。
     cloud_robot_lab_root: str = Field(default="/root/robot_lab", description="云端 robot_lab 根目录（固定路径）")
+    # 云端临时目录落点（用于存放临时脚本、日志和状态退出码）。
+    cloud_tmp_dir: str = Field(default="/root/autodl-tmp/robot_lab/tmp", description="云端临时目录落点（用于存放临时脚本、日志和状态退出码）")
     # 云端资产文件固定落点。
     cloud_asset_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/assets/taili_quad.py", description="云端资产文件固定落点")
     # 云端任务目录固定落点。
@@ -93,20 +95,20 @@ class TailiCloudConfig(BaseModel):
     # 云端训练命令模板。
     train_command_template: str = Field(default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless", description="云端训练命令模板，支持变量: task_name")
     # 云端播放 / 验证命令模板。
-    play_command_template: str = Field(default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video", description="云端播放/验证命令模板，支持变量: task_name")
-    # 播放视频时的并行环境数，默认保持脚本默认值（通常是 64）。
-    play_num_envs: int | None = Field(default=None, ge=1, description="播放视频时的并行环境数；None 表示不额外传参")
+    play_command_template: str = Field(
+        default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video --video_length={video_length} --num_envs=1",
+        description="云端播放/验证命令模板，支持变量: task_name, video_length"
+    )
     # play.py 渲染视频的超时时间（秒）。渲染通常需要 2~5 分钟，不能用默认的 60s。
     play_timeout_seconds: int = Field(default=600, ge=30, description="play.py 渲染视频的超时时间（秒）")
+    # 渲染视频的总帧数/步数（Isaac Lab 默认 50Hz 控制频率下，1000 步约等于 20 秒视频）。
+    play_video_length: int = Field(default=1000, ge=50, description="生成视频的时长（仿真步数，默认1000步对应约20s视频）")
     # 远端训练日志根目录。
     eval_log_root: str = Field(default="/root/robot_lab/logs/rsl_rl", description="云端训练日志根目录")
-    # 总训练迭代次数，动态生成。
-    max_training_iterations: int = Field(default=1000, ge=1, description="单轮训练总迭代次数，由配置生成阶段给出")
     # 中间检查间隔（自动推导或覆盖值）。
     eval_check_interval: int = Field(default=100, ge=1, description="训练中日志检查间隔（iterations）")
     # 每次轮询采样的 checkpoint 窗口大小。取本轮新增 blocks 的最后 N 个组成一个采样窗口。
     eval_sample_window_size: int = Field(default=5, ge=1, description="每次轮询采样的 checkpoint 数量")
-
 
     # 自动迭代上限。
     max_auto_iterations: int = Field(default=2, ge=0, description="评估失败后允许的自动迭代轮数上限（达到后触发人工介入）。")
@@ -115,11 +117,6 @@ class TailiCloudConfig(BaseModel):
     max_training_minutes: int = Field(default=240, ge=1, description="单轮训练允许的最长分钟数")
     # 人工介入文本。
     hitl_response_text: str | None = Field(default=None, description="人工介入文本。若不为空，则在触发 WAIT_HUMAN 后自动写入并继续执行。")
-
-    # 训练日志中评估 Agent 必须认识的核心指标说明。
-    eval_metric_specs: list[dict] = Field(default_factory=list, description="评估 Agent 使用的指标说明列表")
-    # 训练日志中评估 Agent 用来早停的辅助规则摘要。
-    eval_early_stop_rules: list[dict] = Field(default_factory=list, description="训练中 early stop 判定规则列表")
 
     # 应用名。
     app_name: str = "agents"
@@ -171,8 +168,8 @@ class TailiConfigContext(BaseModel):
     current_draft: dict | None = None
     # 历史版本列表。
     history: list[dict] = Field(default_factory=list)
-    # 最近失败原因列表。
-    failure_reasons: list[str] = Field(default_factory=list)
+    # 最近失败原因。
+    failure_reason: str | None = None
     # 失败摘要文本。
     failure_summary: str | None = None
     # 当前迭代轮数。
@@ -220,24 +217,18 @@ class TailiTrainingLogJudgeResult(BaseModel):
 
     # 动作：继续 / 判定失败早停 / 判定收敛早停。
     action: Literal["continue", "stop_failed", "stop_converged"]
-    # 评估依据的分数或证据。
+    # 评估依据的分数或证据摘要。
     score: dict
-    # 原因列表。
-    reasons: list[str] = Field(default_factory=list)
-    # 置信度。
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    # 判定理由与趋势分析。
+    reason: str
 
 
 class TailiVideoJudgeResult(BaseModel):
     """视频评估 Agent 的结构化输出。"""
 
-    # 是否通过。
+    # 是否通过验收。
     passed: bool
     # 评估得分卡 / 证据卡。
     score: dict
-    # 不通过原因。
-    reasons: list[str] = Field(default_factory=list)
-    # 下一步动作。
-    next_action: str = Field(default="revise")
-    # 证据模式。
-    evidence_mode: str = Field(default="play_video")
+    # 验收结论与综合评价（无论通过与否都要给出）。
+    reason: str
