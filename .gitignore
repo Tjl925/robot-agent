@@ -9,9 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
-taili_quad/
+taili_quad
 .vscode/
 .idea/
 .env
-logs/
-cloud/
+logs
+cloud

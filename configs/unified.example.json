@@ -30,7 +30,7 @@
     "eval_log_root": "/root/autodl-tmp/robot_lab/logs/rsl_rl",
     "eval_check_interval": 100,
     "eval_sample_window_size": 5,
-    "max_auto_iterations": 3,
+    "max_auto_iterations": 4,
     "max_training_minutes": 480,
     "hitl_response_text": null,
     "app_name": "agents",

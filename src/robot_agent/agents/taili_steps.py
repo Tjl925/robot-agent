@@ -536,8 +536,7 @@ class TailiConfigSynthesisAgent(_TailiStepBaseAgent):
             user_prompt=prompt_text,
             schema=TailiConfigDraft,
         )
-        # 【版本号统一由系统管理】不信任 LLM 回吐的 draft.version/parent_version（历史 bug：CONFIG_VERSION 永不写回，
-        # payload 恒 version=1，LLM 为自圆其说编造 2/3 并经 history 反喂污染）。这里自增并落盘，使其与轮次严格一致。
+        
         new_version = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1
         ctx.session.state[STATE_P2_CONFIG_VERSION] = new_version
         ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = new_version - 1
