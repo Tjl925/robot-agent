@@ -26,6 +26,7 @@ class LLMCallConfig:
     default_base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-pro"
     max_retries: int = 2
+    reasoning_effort: str = "max"
 
 
 class UnifiedLLMClient:
@@ -57,7 +58,7 @@ class UnifiedLLMClient:
                 
                 # 根据不同模型附加对应的高级推理参数
                 if "deepseek" in self.config.model.lower():
-                    kwargs["reasoning_effort"] = "high"
+                    kwargs["reasoning_effort"] = self.config.reasoning_effort
                     kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
                 elif "qwen" in self.config.model.lower():
                     kwargs["extra_body"] = {"enable_thinking": True}
@@ -66,16 +67,39 @@ class UnifiedLLMClient:
                 
                 print(f"\n\033[96m[{schema_name} LLM Response Stream]\033[0m")
                 full_text = ""
+                in_reasoning = False
                 for chunk in response:
+                    if not chunk.choices:
+                        continue
                     delta = chunk.choices[0].delta
-                    # For deepseek-reasoner reasoning chunks
+                    # For reasoning chunks: emit ANSI gray once per block, not per token
                     if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                        print(f"\033[90m{delta.reasoning_content}\033[0m", end="", flush=True)
+                        if not in_reasoning:
+                            print("\033[90m", end="", flush=True)
+                            in_reasoning = True
+                        print(delta.reasoning_content, end="", flush=True)
+                    else:
+                        if in_reasoning:
+                            print("\033[0m", end="", flush=True)
+                            in_reasoning = False
                     # For normal content chunks
                     if hasattr(delta, "content") and delta.content:
                         full_text += delta.content
+                if in_reasoning:
+                    print("\033[0m", end="", flush=True)
                 print("\n")
+                
+                # 兼容去除可能带有的 markdown 代码块
+                full_text = full_text.strip()
+                if full_text.startswith("```json"):
+                    full_text = full_text[7:]
+                elif full_text.startswith("```"):
+                    full_text = full_text[3:]
+                if full_text.endswith("```"):
+                    full_text = full_text[:-3]
+                full_text = full_text.strip()
+
                 return schema.model_validate_json(full_text)
             except Exception as exc:
                 last_error = exc
-        raise RuntimeError(f"Failed to call DeepSeek model for {schema_name}: {last_error}")
+        raise RuntimeError(f"Failed to call LLM model for {schema_name}: {last_error}")

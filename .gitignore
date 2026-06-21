@@ -13,3 +13,5 @@ taili_quad/
 .vscode/
 .idea/
 .env
+logs/
+cloud/

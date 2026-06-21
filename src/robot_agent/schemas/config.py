@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AutoDLConfig(BaseModel):
@@ -31,6 +31,15 @@ class AutoDLConfig(BaseModel):
     token: str
     # 目标 AutoDL 实例 UUID。
     instance_uuid: str
+
+    # 备用机器 SSH 主机地址。
+    backup_ssh_host: str = "183.147.142.40"
+    # 备用机器 SSH 端口。
+    backup_ssh_port: int = 30113
+    # 备用机器 SSH 用户名。
+    backup_ssh_user: str = "root"
+    # 备用机器 SSH 密码。
+    backup_ssh_password: str = "zxy5ts34"
 
     # 开机时使用的载荷类型，当前默认是 GPU 实例。
     power_on_payload: str = "gpu"
@@ -59,6 +68,65 @@ class AutoDLConfig(BaseModel):
     session_id: str = "agent_session"
 
 
+class WindowsRemoteConfig(BaseModel):
+    """Windows 主机直连配置（remote_platform=windows 时启用）。
+
+    与 Linux 链路（AutoDL 开机 -> 备用服务器）完全平行的另一条链路：
+    - 不走 AutoDL 开机，直接 SSH 连这台带 3060 显卡的 Windows 主机；
+    - 远端 shell 为 PowerShell 7（pwsh），命令执行层由 taili_cloud_windows 提供；
+    - 路径与训练/评估命令模板默认从 robot_lab_root + conda_env 自动派生，
+      只需填 ssh 连接信息和 robot_lab 根目录即可；需要时也可在 json 里显式覆盖。
+
+    注意：路径统一用正斜杠（pwsh 与 OpenSSH SFTP 均接受），便于 posixpath 复用。
+    """
+
+    # —— SSH 连接信息 ——
+    ssh_host: str = Field(default="100.81.254.37", description="Windows 主机 IP")
+    ssh_port: int = Field(default=22, ge=1, le=65535, description="Windows 主机 SSH 端口")
+    ssh_user: str = Field(default="xbtl", description="Windows 主机 SSH 用户名")
+    ssh_password: str = Field(default="", description="Windows 主机 SSH 密码（可用环境变量 WINDOWS_SSH_PASSWORD 覆盖）")
+
+    # —— robot_lab 根目录与 conda 环境（其余路径/命令默认由此派生）——
+    robot_lab_root: str = Field(default="e:/tjl/robot_lab", description="Windows 主机上的 robot_lab 根目录（正斜杠）")
+    conda_env: str = Field(default="tjl", description="训练所用 conda 环境名")
+
+    # —— 以下为派生项：留空则由 robot_lab_root 自动补全；显式填写则原样使用 ——
+    tmp_dir: str = Field(default="", description="远端临时目录，默认 <root>/tmp")
+    asset_path: str = Field(default="", description="资产文件落点，默认 <root>/source/.../assets/taili_quad.py")
+    task_cfg_root: str = Field(default="", description="任务目录落点，默认 <root>/source/.../quadruped/taili_quad")
+    eval_log_root: str = Field(default="", description="训练日志根目录，默认 <root>/logs/rsl_rl")
+    train_command_template: str = Field(default="", description="Windows 训练命令模板（pwsh），支持变量 task_name")
+    play_eval_command_template: str = Field(default="", description="Windows 评估命令模板（pwsh），支持变量 task_name/eval_terrain")
+
+    @model_validator(mode="after")
+    def _derive_defaults(self) -> "WindowsRemoteConfig":
+        root = str(self.robot_lab_root).replace("\\", "/").rstrip("/")
+        self.robot_lab_root = root
+        if not self.tmp_dir:
+            self.tmp_dir = f"{root}/tmp"
+        if not self.asset_path:
+            self.asset_path = f"{root}/source/robot_lab/robot_lab/assets/taili_quad.py"
+        if not self.task_cfg_root:
+            self.task_cfg_root = f"{root}/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad"
+        if not self.eval_log_root:
+            self.eval_log_root = f"{root}/logs/rsl_rl"
+        # pwsh 训练/评估命令：先激活 conda 环境，再 cd 到 root 跑脚本。
+        # 默认依赖 conda 已对 pwsh 初始化（conda init powershell）；若非交互会话找不到 conda，
+        # 可在 json 里把模板改成带完整 conda 路径或 `& conda shell.powershell hook | iex` 前缀。
+        if not self.train_command_template:
+            self.train_command_template = (
+                f"conda activate {self.conda_env}; cd '{root}'; "
+                f"python scripts/reinforcement_learning/rsl_rl/train.py --task={{task_name}} --headless"
+            )
+        if not self.play_eval_command_template:
+            self.play_eval_command_template = (
+                f"conda activate {self.conda_env}; cd '{root}'; "
+                f"python scripts/reinforcement_learning/rsl_rl/play_eval.py "
+                f"--task={{task_name}} --headless --video --num_envs=1 --eval_terrain={{eval_terrain}}"
+            )
+        return self
+
+
 class TailiCloudConfig(BaseModel):
     """Taili 专用云端接入配置。
 
@@ -66,18 +134,22 @@ class TailiCloudConfig(BaseModel):
     本地 `taili_quad/` -> 云端 `robot_lab/`。
     """
 
+    # 远端平台：linux=沿用 AutoDL/备用服务器(bash/tmux)，windows=直连 Windows 主机(pwsh)。
+    # 决定 taili_steps 选用哪套远端命令执行后端（taili_cloud / taili_cloud_windows）。
+    remote_platform: Literal["linux", "windows"] = Field(default="linux", description="远端平台开关：linux / windows")
+
     # 本地机械狗模型根目录。
     local_robot_root: str = Field(default="taili_quad", description="本地机械狗模型根目录")
     # 本地机器人 URDF 所在子目录。
     local_robots_subdir: str = Field(default="urdf", description="本地机器人 URDF 子目录")
     # 云端 robot_lab 根目录（固定路径）。
-    cloud_robot_lab_root: str = Field(default="/root/robot_lab", description="云端 robot_lab 根目录（固定路径）")
+    cloud_robot_lab_root: str = Field(default="/root/autodl-tmp/robot_lab", description="云端 robot_lab 根目录（固定路径）")
     # 云端临时目录落点（用于存放临时脚本、日志和状态退出码）。
     cloud_tmp_dir: str = Field(default="/root/autodl-tmp/robot_lab/tmp", description="云端临时目录落点（用于存放临时脚本、日志和状态退出码）")
     # 云端资产文件固定落点。
-    cloud_asset_path: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/assets/taili_quad.py", description="云端资产文件固定落点")
+    cloud_asset_path: str = Field(default="/root/autodl-tmp/robot_lab/source/robot_lab/robot_lab/assets/taili_quad.py", description="云端资产文件固定落点")
     # 云端任务目录固定落点。
-    cloud_task_cfg_root: str = Field(default="/root/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad", description="云端任务目录固定落点")
+    cloud_task_cfg_root: str = Field(default="/root/autodl-tmp/robot_lab/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad", description="云端任务目录固定落点")
 
     # 远端命令超时时间（秒）。
     remote_timeout_seconds: int = Field(default=60, ge=1, description="云端命令超时时间（秒）")
@@ -91,18 +163,23 @@ class TailiCloudConfig(BaseModel):
     remote_password: str | None = Field(default=None, description="由 Phase-1 提供的云端 SSH 密码")
 
     # 云端训练任务名。
-    task_name: str = Field(default="RobotLab-Isaac-Velocity-Flat-Taili-Quad-v0", description="云端训练任务名（固定风格）")
+    task_name: str = Field(default="RobotLab-Isaac-Velocity-Rough-Taili-Quad-v0", description="云端训练任务名（固定风格）")
     # 云端训练命令模板。
     train_command_template: str = Field(default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless", description="云端训练命令模板，支持变量: task_name")
-    # 云端播放 / 验证命令模板。
-    play_command_template: str = Field(
-        default="cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video --video_length={video_length} --num_envs=1",
-        description="云端播放/验证命令模板，支持变量: task_name, video_length"
+    # 评估时使用的地形列表
+    play_eval_terrains: list[str] = Field(default=["flat", "boxes", "stairs_down", "stairs_up"], description="评估时使用的地形列表")
+    # play_eval.py 整体渲染的超时时间（秒）
+    play_eval_timeout_seconds: int = Field(default=900, ge=30, description="play_eval.py 渲染视频的超时时间（秒）")
+    # 多地形评估命令模板
+    play_eval_command_template: str = Field(
+        default=(
+            "cd /root/autodl-tmp/robot_lab && "
+            "python scripts/reinforcement_learning/rsl_rl/play_eval.py "
+            "--task={task_name} --headless --video --num_envs=1 "
+            "--eval_terrain={eval_terrain}"
+        ),
+        description="多地形评估命令模板，支持变量: task_name, eval_terrain"
     )
-    # play.py 渲染视频的超时时间（秒）。渲染通常需要 2~5 分钟，不能用默认的 60s。
-    play_timeout_seconds: int = Field(default=600, ge=30, description="play.py 渲染视频的超时时间（秒）")
-    # 渲染视频的总帧数/步数（Isaac Lab 默认 50Hz 控制频率下，1000 步约等于 20 秒视频）。
-    play_video_length: int = Field(default=1000, ge=50, description="生成视频的时长（仿真步数，默认1000步对应约20s视频）")
     # 远端训练日志根目录。
     eval_log_root: str = Field(default="/root/robot_lab/logs/rsl_rl", description="云端训练日志根目录")
     # 中间检查间隔（自动推导或覆盖值）。
@@ -115,6 +192,51 @@ class TailiCloudConfig(BaseModel):
 
     # 单轮训练最长分钟数。
     max_training_minutes: int = Field(default=240, ge=1, description="单轮训练允许的最长分钟数")
+    # 是否在 revise 轮从历史最优 checkpoint 续训（warm-start），让迭代真正累积技能而非每轮从零重训。
+    resume_from_best: bool = Field(default=True, description="revise 轮是否从历史最优 checkpoint 续训（warm-start）。True=续训，False=每轮从零训练。")
+    # max_iterations 时间预算可达性截断：用上一轮实测每步耗时估算本轮在 max_training_minutes 内能跑到的步数，
+    # 若 LLM 设的 max_iterations 超出可达范围，则用原生 --max_iterations 截断，让训练自然 completed 而非被墙钟杀死浪费一轮。
+    iter_budget_cap_enabled: bool = Field(default=True, description="是否按时间预算截断 max_iterations，避免墙钟超时浪费整轮训练。")
+    iter_budget_safety_ratio: float = Field(default=0.85, gt=0.0, le=1.0, description="可达步数安全系数（预留启动/落盘/视频渲染等开销）。")
+
+    # ===== 视频评估·数值硬闸（基于 play_eval 写入 eval_meta 的 achieved_metrics）=====
+    # 总开关：开启后，数值不达标可否决视频裁判的"通过"（只会让通过更难，绝不把失败救成通过）。
+    metric_gate_enabled: bool = Field(default=True, description="是否启用 achieved_metrics 数值硬闸（可否决 VLM 误判通过）。")
+    # 机器人站立髋高（米），用于把步幅归一化为 stride/hip_height 做跨尺寸判断。
+    robot_hip_height: float = Field(default=0.53, ge=0.05, description="机器人名义站立髋高（米），用于步幅归一化。")
+    # —— 任务完成类（与机器人尺寸无关，较硬）——
+    gate_min_fwd_speed_ratio: float = Field(default=0.4, description="前进段实速/指令速 低于此值判失败（几乎没按指令前进）。")
+    gate_max_resets: int = Field(default=0, ge=0, description="评估时长内允许的 reset 次数上限，超过判失败（基本=摔倒/出界）。")
+    # —— 步态质量类（物理先验默认，provisional，建议据真机数据微调）——
+    gate_max_contact_freq_hz: float = Field(default=3.0, gt=0, description="motion 段每足触地频率上限（Hz），超过判为碎步/高频踏步。")
+    gate_min_swing_time_s: float = Field(default=0.13, gt=0, description="平均摆动时长下限（秒），过短判为碎步。")
+    gate_min_stride_norm: float = Field(default=0.25, gt=0, description="归一化步幅(步幅/髋高)下限，过短判为碎步/拖步。")
+    gate_max_bounce_ratio: float = Field(default=0.45, gt=0, description="motion 段 |vz|/前进速 上限，过大判为上下颠簸/跳。")
+    # —— 碎步以外的失败模式检测（metrics-only：play_eval 已实测并喂 VLM/修参，但阈值 None=暂不接硬闸）——
+    # 这些默认 None=仅观测不否决：阈值是四足运动学先验，未在本管线标定，直接当硬闸会误杀第一个好策略。
+    # 标定流程：先让 play_eval 写出指标，用一个"已知良好"策略(或 B2 参考)跑一遍读真实分布，把阈值设到正常值的约 0.4x 再填数开闸。
+    gate_min_swing_clearance_m: float | None = Field(default=None, description="摆动相足端最矮离地高度下限(米)，过低=拖地。None=不接硬闸仅观测。台阶地形 baseline 跨台阶跳变，启用时应在 overrides 里对 stairs 置 None 禁用。")
+    gate_max_foot_slip_ratio: float | None = Field(default=None, description="支撑相足端对地水平速度>0.1m/s 的占比上限，过高=触地打滑/拖滑。None=不接硬闸仅观测。")
+    gate_max_foot_touchdown_cv: float | None = Field(default=None, description="四足 motion 段触地次数变异系数上限，过大=跛行/瘸腿。None=不接硬闸仅观测。")
+    gate_max_diag_pair_diff: float | None = Field(default=None, description="两对角线触地总数归一化差上限，过大=对角失衡(跛行指纹)。None=不接硬闸仅观测。")
+    gate_max_p95_touchdown_grf_bw: float | None = Field(default=None, description="落地法向冲击力 p95(体重倍数)上限，过大=砸地/硬着陆。None=不接硬闸仅观测。")
+    # 按地形覆盖部分阈值（缺省项继承上面的全局 gate_*）。键=地形名；值={短阈值名: 数值}，短名=gate_* 去掉前缀。
+    # 例：楼梯天生步幅短、步频高、颠簸大，应放宽；平地不在表里则用全局（最严）。这些是 provisional 骨架值，请据真机分地形数据微调。
+    # 值可为数值(覆盖阈值)或 None(在该地形禁用该规则，如 clearance 在台阶上 baseline 失真应禁用)。
+    gate_terrain_overrides: dict[str, dict[str, float | None]] = Field(
+        default_factory=lambda: {
+            "boxes": {"max_contact_freq_hz": 3.6, "min_stride_norm": 0.18, "max_bounce_ratio": 0.55},
+            "stairs_down": {"max_contact_freq_hz": 4.0, "min_swing_time_s": 0.10, "min_stride_norm": 0.13, "max_bounce_ratio": 0.60, "min_fwd_speed_ratio": 0.30},
+            "stairs_up": {"max_contact_freq_hz": 4.0, "min_swing_time_s": 0.10, "min_stride_norm": 0.13, "max_bounce_ratio": 0.65, "min_fwd_speed_ratio": 0.30},
+        },
+        description="按地形覆盖硬闸阈值；缺省继承全局 gate_*；值为 None=在该地形禁用该规则。可覆盖键：min_fwd_speed_ratio/max_resets/max_contact_freq_hz/min_swing_time_s/min_stride_norm/max_bounce_ratio/min_swing_clearance_m/max_foot_slip_ratio/max_foot_touchdown_cv/max_diag_pair_diff/max_p95_touchdown_grf_bw。",
+    )
+
+    # ===== 训练级"最终验收"指标（仅供验收/参考，绝不参与训练早停决策）=====
+    accept_metrics_enabled: bool = Field(default=True, description="训练完成后是否从训练日志抓取验收指标并对照目标（仅参考，不影响早停）。")
+    accept_min_terrain_levels: float = Field(default=6.0, description="验收目标：Curriculum/terrain_levels 期望 >= 此值（已爬到高难度地形）。")
+    accept_max_error_vel_xy: float = Field(default=0.4, description="验收目标：Metrics/base_velocity/error_vel_xy 期望 <= 此值。")
+    accept_max_error_vel_yaw: float = Field(default=0.5, description="验收目标：Metrics/base_velocity/error_vel_yaw 期望 <= 此值。")
     # 人工介入文本。
     hitl_response_text: str | None = Field(default=None, description="人工介入文本。若不为空，则在触发 WAIT_HUMAN 后自动写入并继续执行。")
 
@@ -141,45 +263,6 @@ class TailiUrdfAnalysisResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
-class TailiConfigContext(BaseModel):
-    """Taili 配置生成 Agent 的输入上下文。
-
-    这个对象不是最终配置，而是把 create / revise 所需要的
-    所有上下文一次性装好，避免 LLM 需要自己猜历史状态。
-    """
-
-    # 当前模式：create 或 revise。
-    mode: str = Field(default="create", description="create / revise")
-    # 当前版本号。
-    version: int
-    # 父版本号。
-    parent_version: int | None = None
-    # 当前任务目标。
-    task_goal: str | None = None
-    # 当前 URDF 文件路径。
-    urdf_path: str | None = None
-    # 当前 URDF 原文。
-    urdf_text: str | None = None
-    # 当前 URDF 风险等级。
-    urdf_risk: str | None = None
-    # 当前 URDF 问题列表。
-    urdf_issues: list[str] = Field(default_factory=list)
-    # 当前已经生成过的草案（用于 revise）。
-    current_draft: dict | None = None
-    # 历史版本列表。
-    history: list[dict] = Field(default_factory=list)
-    # 最近失败原因。
-    failure_reason: str | None = None
-    # 失败摘要文本。
-    failure_summary: str | None = None
-    # 当前迭代轮数。
-    iteration_round: int = 0
-    # 允许的最大迭代轮数。
-    max_iterations: int = 0
-    # 参考模板文本字典。
-    reference_templates: dict[str, str] = Field(default_factory=dict)
-
-
 class TailiConfigDraft(BaseModel):
     """Taili 配置生成 Agent 的结构化输出。
 
@@ -197,17 +280,17 @@ class TailiConfigDraft(BaseModel):
     # 修改原因与思考过程。
     reasoning: str = Field(description="修改原因与思考过程")
     # 资产代码草案 (asset_code)
-    asset_code: str
+    asset_code: str | None = None
     # agents/__init__.py
-    agents_init_code: str
+    agents_init_code: str | None = None
     # agents/rsl_rl_ppo_cfg.py
-    agents_ppo_cfg_code: str
+    agents_ppo_cfg_code: str | None = None
     # 任务注册代码草案 (__init__.py)
-    task_init_code: str
+    task_init_code: str | None = None
     # flat_env_cfg.py
-    flat_env_cfg_code: str
+    flat_env_cfg_code: str | None = None
     # rough_env_cfg.py
-    rough_env_cfg_code: str
+    rough_env_cfg_code: str | None = None
 
 
 

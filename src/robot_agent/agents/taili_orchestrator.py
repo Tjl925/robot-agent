@@ -41,6 +41,7 @@ from robot_agent.agents.taili_steps import (
 from robot_agent.schemas.config import TailiCloudConfig
 from robot_agent.schemas.state import (
     STATE_P2_ARCHIVE_COMPLETED,
+    STATE_P2_BEST_CHECKPOINT,
     STATE_P2_CONFIG_HISTORY,
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
@@ -129,22 +130,6 @@ class TailiOrchestratorAgent(BaseAgent):
             Event(author=self.name, actions=EventActions(state_delta=dict(ctx.session.state))),
         )
 
-    async def _append_config_revision(self, ctx: InvocationContext, reason: str) -> None:
-        # 当评估失败时，把当前配置版本写入 history，并切换到 revise 模式。
-        history = list(ctx.session.state.get(STATE_P2_CONFIG_HISTORY, []))
-        history.append(
-            {
-                "version": int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)),
-                "mode": ctx.session.state.get(STATE_P2_CONFIG_MODE, "create"),
-                "reason": reason,
-            }
-        )
-        ctx.session.state[STATE_P2_CONFIG_HISTORY] = history
-        ctx.session.state[STATE_P2_CONFIG_VERSION] = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1
-        ctx.session.state[STATE_P2_CONFIG_MODE] = "revise"
-        ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = int(ctx.session.state[STATE_P2_CONFIG_VERSION]) - 1
-        await self._commit_state(ctx)
-
     async def _run_step(self, ctx: InvocationContext, step_agent: BaseAgent) -> AsyncGenerator[Event, None]:
         # 统一封装“运行一步 + 提交状态”。
         async for event in step_agent.run_async(ctx):
@@ -162,7 +147,6 @@ class TailiOrchestratorAgent(BaseAgent):
             "phase2.train.log_input_payload",
             "phase2.config.generated_text",
             "phase2.video.input_payload",
-            "phase2.video.judge_result",
             "phase2.play.stdout",
         }
         
@@ -207,7 +191,7 @@ class TailiOrchestratorAgent(BaseAgent):
             ctx.session.state[STATE_P2_EVAL_PASSED] = False
             fail_reason = ctx.session.state.get(STATE_P2_EVAL_FAIL_REASON, "")
             reason_text = f"原因: {fail_reason}; 训练未正常完成 (status={train_status})"
-            ctx.session.state[STATE_P2_HITL_REASON] = reason_text
+            ctx.session.state[STATE_P2_EVAL_FAIL_REASON] = reason_text
             await self._commit_state(ctx)
 
     @override
@@ -271,9 +255,6 @@ class TailiOrchestratorAgent(BaseAgent):
 
             # 7. 如果没通过，进入 revise 迭代，直到达到最大自动轮数。
             while not bool(ctx.session.state.get(STATE_P2_EVAL_PASSED, False)) and int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)) < int(ctx.session.state.get(STATE_P2_ITER_MAX, self.cfg.max_auto_iterations)):
-                failure_reason = ctx.session.state.get(STATE_P2_EVAL_FAIL_REASON, "")
-                reason = f"原因: {failure_reason}" if failure_reason else str(ctx.session.state.get(STATE_P2_HITL_REASON, "revise"))
-                await self._append_config_revision(ctx, reason=reason)
                 async for event in self._run_step(ctx, self.repair):
                     yield event
                 async for event in self._run_step(ctx, self.config_synthesis):
@@ -296,7 +277,14 @@ class TailiOrchestratorAgent(BaseAgent):
                 ctx.session.state[STATE_P2_HITL_REASON] = str(ctx.session.state.get(STATE_P2_HITL_REASON, "达到最大自动迭代轮数，需人工介入"))
                 ctx.session.state[STATE_P2_STATUS] = "pending"
                 await self._commit_state(ctx)
-                yield self._yield_text("taili_phase2: 达到最大自动迭代轮数，进入 HITL")
+                best = ctx.session.state.get(STATE_P2_BEST_CHECKPOINT, {}) or {}
+                best_dir = best.get("local_dir", "")
+                best_note = (
+                    f"；当前最优 checkpoint(round={best.get('round')}, score={best.get('overall_score')}, "
+                    f"passed={best.get('overall_passed')}) 已保底下载至 {best_dir}"
+                    if best_dir else ""
+                )
+                yield self._yield_text(f"taili_phase2: 达到最大自动迭代轮数，进入 HITL{best_note}")
                 return
 
             # 9. 通过后归档输出。

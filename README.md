@@ -9,7 +9,7 @@
 1. **单入口与单主线**：统一由 `main.py` 启动；专一服务于本地 `taili_quad/` → 云端 `robot_lab/` 唯一主线。
 2. **LLM 思考，代码执行**：LLM 仅负责复杂的逻辑推理与趋势诊断（输出严格 JSON），繁琐的流程流转、文件生成与 SFTP 同步由代码确定性处理。
 3. **记忆瘦身与物理隔离**：多轮修订历史仅保存极简的文本摘要以杜绝 Token 爆炸。在修订模式 (`revise`) 下，Agent 直接从本地磁盘读取实际生成的 Python 代码喂给 LLM，保证上下文的 100% 精准与高性价比。
-4. **多模型混合协同 (Mixture of Models)**：按任务边界精细分配算力。代码生成与数据趋势判断由逻辑最强的 DeepSeek 负责，而视频验收阶段则动态切入支持视觉输入的 Qwen-VL 模型。
+4. **多模型混合协同 (Mixture of Models)**：按任务边界精细分配算力。代码生成与数据趋势判断由逻辑最强的 DeepSeek 负责，而视频验收阶段则动态切入支持视觉输入的 Qwen 模型。
 5. **100% 常量化管理**：所有跨 Agent 传输的状态键定义于 `state.py`，代码中无任何硬编码字符串键，彻底消除了拼写隐患。
 
 ---
@@ -63,10 +63,16 @@ cp configs/unified.example.json configs/unified.json
 | `phase2.local_robot_root` | 本地机器人模型根目录（默认 `taili_quad`） |
 | `phase2.cloud_robot_lab_root` | 云端 `robot_lab` 根路径 |
 | `phase2.train_command_template` | 远端训练启动命令模板 |
-| `phase2.play_command_template` | 远端视频渲染命令模板 |
-| `phase2.play_timeout_seconds` | 视频渲染超时（默认 600s，勿使用默认 60s） |
+| `phase2.play_eval_command_template` | 远端四地形评估视频渲染命令模板 |
+| `phase2.play_eval_timeout_seconds` | 视频渲染超时（默认 900s，勿使用默认 60s） |
 | `phase2.max_auto_iterations` | 最大自动迭代轮次 |
 | `phase2.max_training_minutes` | 单轮训练最大时长（分钟） |
+| `phase2.resume_from_best` | revise 轮是否从历史最优 checkpoint 续训（warm-start，默认开） |
+| `phase2.metric_gate_enabled` / `phase2.gate_*` | 视频评估的客观数值硬闸开关与阈值（速度/步频/摆动/步幅/颠簸等） |
+| `phase2.gate_terrain_overrides` | 按地形覆盖部分硬闸阈值（楼梯等放宽；值为 `null`=该地形禁用该规则） |
+| `phase2.gate_min_swing_clearance_m` 等 4 项 | 碎步以外失败模式（拖地/打滑/跛行/砸地）硬闸阈值，默认 `null`=**仅观测不否决**，标定后填值开闸（见 PROJECT_SUMMARY §4.16） |
+| `phase2.robot_hip_height` | 机器人名义站立髋高（步幅归一化用，默认 0.53） |
+| `phase2.accept_*` | 训练"最终验收"指标目标（terrain_levels / error_vel_xy / error_vel_yaw，仅参考） |
 
 ### 3.4 启动
 
@@ -93,13 +99,12 @@ Phase 1 (云端就绪)               Phase 2 (部署训练闭环)
                                 └───────────────────────────────────────────┘
 ```
 
-### 4.2 三态退出协议
+### 4.2 多态退出协议
 
 以 `STATE_P2_TRAIN_STATUS` 为核心的训练退出协议：
 
 | 状态值 | 含义 | 后续行为 |
 |---|---|---|
-| `running` | 训练执行中 | Agent 持续增量日志拉取 |
 | `early_stopped` | 日志裁判判定发散/崩溃 | 强制杀死远端进程，跳过视频，直接进入 Revise |
 | `completed` | 训练正常完成或收敛 | 自动触发 `play.py` 渲染评估视频，流转至视频裁判 |
 | `play_failed` | 训练已完成但视频渲染报错 | 拦截熔断，跳过视频评估，直接进入 Revise |
@@ -131,16 +136,16 @@ Phase 1 (云端就绪)               Phase 2 (部署训练闭环)
 
 | Agent | 职责 |
 |---|---|
-| **`TrainTailiStepAgent`** | 远端异步启动训练，byte-offset 增量日志拉取，定期采样 Checkpoint 投喂裁判，发散时强制早停，训练后自动渲染视频 |
+| **`TrainTailiStepAgent`** | 远端异步启动训练，byte-offset 增量日志拉取，定期采样 Checkpoint 投喂裁判，发散时强制早停；存在历史最优 checkpoint 时 **warm-start 续训并自检**，训练后抓取**验收快照**并渲染四地形视频 |
 | **`EvaluateTailiTrainingLogAgent`** | 日志裁判：对 Checkpoint 指标趋势做单次无状态判定（`continue` / `stop_failed` / `stop_converged`） |
-| **`EvaluateTailiVideoAgent`** | 视频裁判：下载远端评估视频，调用 **Qwen3.6-Plus 多模态模型**进行真实的物理形态打分，基于视频动作给出最终判定 |
+| **`EvaluateTailiVideoAgent`** | 视频裁判：下载远端评估视频，调用 **Qwen3.7-Plus 多模态模型**进行物理形态打分；并结合 play_eval 实测写入 `eval_meta` 的 `achieved_metrics` 做**客观数值硬闸**（可否决 VLM 误判通过、阈值按地形分档），给出最终判定 |
 
 ### 迭代与归档
 
 | Agent | 职责 |
 |---|---|
 | **`RepairTailiWorkflowStepAgent`** | 故障自愈：收集上一轮失败原因，更新迭代轮次，为下一轮 `revise` 做准备 |
-| **`ArchiveTailiOutputsStepAgent`** | 成果归档：评估通过后，将最终配置路径与得分归档 |
+| **`ArchiveTailiOutputsStepAgent`** | 成果归档：评估通过后归档最终配置、得分、**最优 .pt 落点（`logs/taili_best/`）、checkpoint 历史与训练验收快照** |
 
 ---
 
@@ -158,6 +163,8 @@ D:\robot_agent
 │  └─ robot_lab/
 │     ├─ assets/                    # 参考机器人资产模板
 │     └─ tasks/                     # 参考任务配置模板
+├─ cloud/                           # 云端 robot_lab 关键脚本本地镜像(train/play_eval/cli_args/velocity_env_cfg/mdp)
+│                                   #   play_eval.py 已插桩采集 achieved_metrics，改后须手动回传云端
 ├─ taili_quad/                      # 自研机械狗模型资产（不入库）
 │  ├─ urdf/                         # URDF 模型文件
 │  ├─ meshes/                       # STL 3D 网格文件
@@ -182,6 +189,7 @@ D:\robot_agent
 │        ├─ llm_client.py           # LLM 客户端封装
 │        ├─ ssh_client.py           # SSH 命令执行客户端
 │        └─ taili_cloud.py          # SFTP 传输与增量日志核心工具
+├─ logs/                            # 运行日志与产物（taili_best/ 存最优 .pt，taili_play_eval/ 存评估视频）
 ├─ PROJECT_SUMMARY.md               # 系统核心架构与痛点攻克记录
 └─ TESTING_PROGRESS.md              # 端到端功能测试进度
 ```
@@ -198,10 +206,10 @@ D:\robot_agent
 
 训练监控 Agent 会遍历追加所有 `idx > last_evaluated_iteration` 的 blocks，确保 `metric_history` 数据链 100% 连续，避免长时休眠唤醒后的"断带"问题。
 
-### 7.3 `create` / `revise` 模式协议
+### 7.3 `create` / `revise` 模式与局部修改协议
 
-- **`create`**：首次部署，基于参考机器人模板 + URDF 诊断报告生成第一版配置
-- **`revise`**：训练失败后，从本地磁盘读取当前版本真实代码 + 轻量 `history` 摘要 + `failure_evidence`，定向优化生成新版配置
+- **`create`**：首次部署，基于参考机器人模板 + URDF 诊断报告生成第一版的 6 个完整配置代码。
+- **`revise`**：训练失败后，大模型基于上一版的失败原因定向优化。大模型采用**“按需局部覆写 (Partial Rewrite)”**机制，仅需输出发生变更的代码字段（通常是 reward 参数），本地持久化目录会自动继承其余未修改的代码，大幅节约 Token 与时间成本。
 
 ### 7.4 调试开关
 
@@ -210,6 +218,24 @@ D:\robot_agent
 | 开关 | 作用 |
 |---|---|
 | `DEBUG_SKIP_PRE_TRAIN` | 跳过 URDF 分析、配置生成、文件落盘与云端同步，直接从训练启动开始（适用于云端已就绪的场景） |
+
+### 7.5 最优 `.pt` 的跨轮留存与交付
+
+每轮视频评估后依据 `eval_meta.json` 的 `checkpoint` 字段定位被评估的精确 `.pt`，按统一冠军排序 `_champion_rank_key`（**视频全过 → 通过地形数 → 综合分 → terrain_levels → -error_vel_xy**，视频证据优先、训练指标仅兜底）维护"迄今最优"，刷新即把**原始 `model_*.pt` + 导出 `policy.pt/onnx` + `params/*.yaml`** 实时下载到本地 `logs/taili_best/`（含 `BEST_MANIFEST.json`）。失败/HITL 也保底留存最优一份。
+
+### 7.6 warm-start 续训（技能跨轮累积）
+
+revise 轮存在历史最优 checkpoint 时，训练命令追加 `--resume --load_run … --checkpoint …` 从最优轮热启动续训（迭代号接续），而非每轮从零冷启动；并自检远端日志 `Loading model checkpoint from` 确认续训真正生效，避免静默白练。
+
+### 7.7 视频评估"客观数值硬闸"+ 按地形分档
+
+云端 `play_eval.py` 在评估时实测物理量写回 `eval_meta.achieved_metrics`（速度跟踪 / 净位移 / 步态频率·摆动·步幅 / 颠簸等）。本地视频裁判据此**硬闸**否决"速度达标但碎步难看"的策略（只会更严、不会救活失败），阈值**按地形分档**（楼梯放宽、平地最严）；并把失败标签映射到具体奖励旋钮（如开启被禁用的 `feet_gait`）驱动 revise。
+
+硬闸已重构为**声明式规则表**（`_gate_rules`）：加一种失败模式 = play_eval 加 1 个量 + 规则表加 1 行 + config 加 1 个阈值。当前为 **metrics-only**（喂 VLM 与修参 LLM，阈值默认 `null` 暂不否决），待训出好策略读真实分布后填阈值开闸（标定路径见 `TESTING_PROGRESS.md` §3.2）。
+
+### 7.8 训练"最终验收"指标（与早停解耦）
+
+训练完成后抓取 `Curriculum/terrain_levels`、`Metrics/base_velocity/error_vel_xy|yaw` 打一张**只读验收快照**（目标 `≥6 / ≤0.4 / ≤0.5`，仅参考），**绝不**作为日志裁判的早停/收敛条件，避免策略为绝对目标死等到最大步数。
 
 ---
 
@@ -223,9 +249,10 @@ D:\robot_agent
 | `phase2.stage` / `phase2.status` | 阶段枚举与总体状态 |
 | `phase2.urdf.*` | URDF 诊断结果（有效性、风险等级） |
 | `phase2.config.*` | 配置模式、版本、历史摘要 |
-| `phase2.train.*` | 训练 PID、日志路径、指标历史、裁判结果 |
+| `phase2.train.*` | 训练 PID、日志路径、指标历史、裁判结果、续训信息、验收快照 |
 | `phase2.play.*` | 视频渲染输出与错误捕获 |
-| `phase2.eval.*` / `phase2.video.*` | 评估视频路径、通过判定、得分 |
+| `phase2.eval.*` / `phase2.video.*` | 评估视频路径、通过判定、得分（含 achieved_metrics 硬闸结果） |
+| `phase2.checkpoint.*` / `phase2.best.*` | 每轮 checkpoint 历史与"迄今最优"checkpoint（含本地 `logs/taili_best/` 落点） |
 | `phase2.iteration.*` | 迭代轮次控制 |
 | `phase2.hitl.*` | 人工介入标志与响应 |
 | `phase2.archive.*` | 最终归档摘要 |

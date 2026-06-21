@@ -53,6 +53,7 @@ STATE_P1_INSTANCE_UUID = "phase1.instance_uuid"
 STATE_P1_RETRY_COUNT = "phase1.retry_count"
 STATE_P1_FAILURE_REASON = "phase1.failure_reason"
 STATE_P1_EVENTS = "phase1.events"
+STATE_P1_USE_BACKUP = "phase1.use_backup"
 
 STATE_P1_SSH_HOST = "phase1.ssh.host"
 STATE_P1_SSH_PORT = "phase1.ssh.port"
@@ -80,13 +81,22 @@ STATE_P2_CONFIG_MODE = "phase2.config.mode"
 STATE_P2_CONFIG_VERSION = "phase2.config.version"
 STATE_P2_CONFIG_PARENT_VERSION = "phase2.config.parent_version"
 STATE_P2_CONFIG_HISTORY = "phase2.config.history"
-STATE_P2_CONFIG_TEMPLATE = "phase2.config.template_name"
 STATE_P2_CONFIG_TEXT = "phase2.config.generated_text"
 
 # ------------- 训练域 -------------
 # 训练状态：running / early_stopped / completed。
 STATE_P2_TRAIN_STATUS = "phase2.train.status"
 STATE_P2_TRAIN_COMMAND = "phase2.train.command"
+# 本轮续训信息（是否 warm-start、来源轮次/checkpoint、是否已从日志确认加载）。
+STATE_P2_TRAIN_RESUME_INFO = "phase2.train.resume_info"
+# 训练完成时抓取的"最终验收"指标快照（terrain_levels / error_vel_xy / error_vel_yaw 对照目标，仅参考）。
+STATE_P2_TRAIN_ACCEPTANCE = "phase2.train.acceptance"
+# 下一轮 warm-start 的"续训源"指针（与"视频最优 best"解耦）：
+# completed / healthy-timeout 轮按训练验收指标更新；发散(early_stopped)/失败轮不更新=回退到上一轮已采纳源。
+# 结构：{round, run_dir, checkpoint_remote, status, acceptance}。
+STATE_P2_TRAIN_RESUME_SOURCE = "phase2.train.resume_source"
+# 预热阶段实测的单步 iteration 稳态耗时（秒），跨轮传递，用于下一轮按时间预算截断 max_iterations。
+STATE_P2_TRAIN_ITER_SECONDS = "phase2.train.iter_seconds"
 # 远端训练进程 PID。
 STATE_P2_TRAIN_PID = "phase2.train.pid"
 # 远端训练日志文件路径。
@@ -105,13 +115,18 @@ STATE_P2_PLAY_EXIT_CODE = "phase2.play.exit_code"
 STATE_P2_PLAY_FAILED = "phase2.play.failed"
 
 # ------------- 评估域 -------------
+# 远端评估视频本地落盘路径字典（terrain -> local_path）。
 STATE_P2_EVAL_VIDEO_PATH = "phase2.eval.video_path"
+# 远端评估视频路径字典（terrain -> remote_path）。
 STATE_P2_EVAL_VIDEO_REMOTE_PATH = "phase2.video.remote_path"
 STATE_P2_EVAL_PASSED = "phase2.eval.passed"
 STATE_P2_EVAL_SCORE = "phase2.eval.score_card"
 STATE_P2_EVAL_FAIL_REASON = "phase2.eval.fail_reason"
 STATE_P2_VIDEO_INPUT_PAYLOAD = "phase2.video.input_payload"
-STATE_P2_VIDEO_JUDGE_RESULT = "phase2.video.judge_result"
+STATE_P2_PLAY_EVAL_RESULTS = "phase2.play_eval.results"
+STATE_P2_VIDEO_JUDGE_SUMMARY = "phase2.video.judge_summary"
+STATE_P2_FAILED_TERRAINS = "phase2.failed_terrains"
+STATE_P2_FAILURE_TAGS = "phase2.failure_tags"
 
 # ------------- 迭代与 HITL 域 -------------
 STATE_P2_ITER_ROUND = "phase2.iteration.current_round"
@@ -120,6 +135,12 @@ STATE_P2_HITL_REQUIRED = "phase2.hitl.required"
 STATE_P2_HITL_REASON = "phase2.hitl.reason"
 STATE_P2_HITL_RESPONSE = "phase2.hitl.response"
 STATE_P2_HITL_RESOLVED = "phase2.hitl.resolved"
+
+# ------------- 最优 checkpoint 留存域 -------------
+# 每轮视频评估对应的 checkpoint 记录列表（round / run_dir / checkpoint_remote / 得分）。
+STATE_P2_CHECKPOINT_HISTORY = "phase2.checkpoint.history"
+# 迄今最优的 checkpoint 记录（含本地下载路径），用于失败/HITL 时的保底交付。
+STATE_P2_BEST_CHECKPOINT = "phase2.best.checkpoint"
 
 # ------------- 归档域 -------------
 STATE_P2_ARCHIVE_SUMMARY = "phase2.archive.summary"

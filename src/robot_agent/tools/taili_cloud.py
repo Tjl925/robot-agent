@@ -4,11 +4,12 @@ from __future__ import annotations
 
 这些工具负责确定性工作：
 - 同步本地生成物到云端 robot_lab 固定路径
-- 扫描远端 logs/checkpoints/videos/tensorboard
+- 扫描远端 logs/videos
 - 供 LLM Agent 作为工具调用，不承担最终判断
 """
 
 from pathlib import Path
+import json
 import posixpath
 import shlex
 import shutil
@@ -106,22 +107,6 @@ def _mkdir_p_sftp(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
                 pass
 
 
-def remote_list_latest_run(host: str, port: int, user: str, password: str, root: str, timeout_seconds: int) -> str:
-    cmd = (
-        "python - <<'PY'\n"
-        "from pathlib import Path\n"
-        f"root = Path(r'''{root}''')\n"
-        "runs = [p for p in root.rglob('*') if p.is_dir() and (p / 'checkpoints').exists()]\n"
-        "runs = sorted(runs, key=lambda p: p.stat().st_mtime)\n"
-        "print(runs[-1] if runs else '')\n"
-        "PY"
-    )
-    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
-    if code != 0:
-        raise TailiCloudToolError(err or out)
-    return out.strip()
-
-
 def start_remote_training(host: str, port: int, user: str, password: str, command: str, tmp_dir: str, timeout_seconds: int) -> dict[str, str]:
     """在远端通过 tmux 会话异步启动训练命令。
 
@@ -136,8 +121,8 @@ def start_remote_training(host: str, port: int, user: str, password: str, comman
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     session_name = f"taili_{run_id}"
 
-    # 在项目内 tmp 目录下以 timestamp 划分干净独立的归档子文件夹，使每次训练证据完全隔离
-    run_tmp_dir = f"{tmp_dir}/{timestamp}"
+    # 在项目内 tmp 目录下以 train 目录划分干净独立的归档子文件夹
+    run_tmp_dir = f"{tmp_dir}/train/{timestamp}"
     log_path = f"{run_tmp_dir}/taili_train_{run_id}.log"
     exit_code_path = f"{run_tmp_dir}/taili_train_{run_id}.exit_code"
     script_path = f"{run_tmp_dir}/taili_run_{run_id}.sh"
@@ -307,8 +292,8 @@ def remote_execute_play_in_tmux(
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     run_tag = session_name.replace("taili_", "")
     
-    # 隔离归档子目录
-    run_tmp_dir = f"{tmp_dir}/{timestamp}"
+    # 隔离归档子目录，使用 play 划分子目录分隔
+    run_tmp_dir = f"{tmp_dir}/play/{timestamp}"
     play_log = f"{run_tmp_dir}/taili_play_{run_tag}.log"
     play_ec = f"{run_tmp_dir}/taili_play_{run_tag}.exit_code"
     script_path = f"{run_tmp_dir}/taili_play_{run_tag}.sh"
@@ -374,42 +359,114 @@ def remote_execute_play_in_tmux(
     raise TailiCloudToolError(f"play.py 在 {timeout_seconds}s 内未完成")
 
 
-def remote_find_latest_video_file(host: str, port: int, user: str, password: str, run_root: str, timeout_seconds: int) -> str:
+def remote_list_latest_run(host: str, port: int, user: str, password: str, root: str, timeout_seconds: int) -> str:
+    # 纯 shell 匹配格式为 YYYY-MM-DD_HH-MM-SS 的目录并倒序取第一个，避免依赖远端 python 环境
     cmd = (
-        "python - <<'PY'\n"
-        "from pathlib import Path\n"
-        f"root = Path(r'''{run_root}''') / 'video'\n"
-        "candidates = sorted([p for p in root.rglob('*.mp4') if p.is_file()], key=lambda p: p.stat().st_mtime)\n"
-        "print(candidates[-1] if candidates else '')\n"
-        "PY"
+        f"ls -1d {shlex.quote(root)}/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/ 2>/dev/null "
+        "| sort | tail -n 1"
     )
     out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
     if code != 0:
-        raise TailiCloudToolError(err or out)
-    return out.strip()
+        return ""
+    return out.strip().rstrip('/')
 
 
-def download_remote_file_to_temp(host: str, port: int, user: str, password: str, remote_path: str, timeout_seconds: int, suffix: str = ".mp4") -> str:
-    local_dir = Path(tempfile.mkdtemp(prefix="taili-video-"))
-    local_path = local_dir / (Path(remote_path).name or f"video{suffix}")
-    fetch_remote_file(host, port, user, password, remote_path, str(local_path), timeout_seconds)
-    return str(local_path)
+def remote_find_play_eval_artifacts(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    run_root: str,
+    timeout_seconds: int,
+    expected_terrains: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict]:
+    """查找 play_eval.py 生成的一组评估产物。
+
+    扫描 ``<run_root>/videos/play_eval/**/eval_meta.json``，读取每个 meta 中的 terrain 字段，
+    并在同目录下找到对应的最新 mp4。返回按 terrain 归类后的字典。
+
+    这个函数故意依赖 eval_meta.json，而不是依赖目录名。这样未来目录命名变化时，
+    只要 meta 的 terrain 字段稳定，评估链路就不会断。
+
+    Returns:
+        {
+          "flat": {
+            "terrain": "flat",
+            "video_remote_path": ".../rl-video-step-0.mp4",
+            "meta_remote_path": ".../eval_meta.json",
+            "video_folder": "...",
+            "meta": {...}
+          },
+          ...
+        }
+    """
+    expected = set(expected_terrains or [])
+    play_eval_dir = posixpath.join(run_root, "videos", "play_eval")
+    cmd = (
+        f"find {shlex.quote(play_eval_dir)} -mindepth 2 -maxdepth 2 -name 'eval_meta.json' -type f "
+        "-printf '%T@ %p\\n' 2>/dev/null | sort -n"
+    )
+    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
+    if code != 0 or not out.strip():
+        return {}
+
+    artifacts: dict[str, dict] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # format: <mtime> <path>
+        try:
+            _, meta_path = line.split(" ", 1)
+        except ValueError:
+            continue
+        meta_path = meta_path.strip()
+        meta_out, _, meta_code = execute_ssh_command(
+            host, port, user, password, f"cat {shlex.quote(meta_path)} 2>/dev/null", timeout_seconds
+        )
+        if meta_code != 0 or not meta_out.strip():
+            continue
+        try:
+            meta = json.loads(meta_out)
+        except json.JSONDecodeError:
+            meta = {"raw_meta_text": meta_out}
+
+        terrain = str(meta.get("terrain") or "").strip()
+        if not terrain:
+            # 兜底：从上级目录名猜，但优先级低于 meta 字段
+            terrain = posixpath.basename(posixpath.dirname(meta_path)).split("_")[0]
+        if expected and terrain not in expected:
+            continue
+
+        video_folder = posixpath.dirname(meta_path)
+        video_cmd = (
+            f"find {shlex.quote(video_folder)} -maxdepth 1 -name '*.mp4' -type f "
+            "-printf '%T@ %p\\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2-"
+        )
+        video_out, _, video_code = execute_ssh_command(host, port, user, password, video_cmd, timeout_seconds)
+        video_path = video_out.strip() if video_code == 0 else ""
+        if not video_path:
+            continue
+
+        # 如果同一 run_root 下重复生成过同一 terrain，按 find 的 mtime 排序，后出现的会覆盖旧项。
+        artifacts[terrain] = {
+            "terrain": terrain,
+            "video_remote_path": video_path,
+            "meta_remote_path": meta_path,
+            "video_folder": video_folder,
+            "meta": meta,
+        }
+
+    return artifacts
 
 
 def wait_for_remote_file_stable(host: str, port: int, user: str, password: str, remote_path: str, timeout_seconds: int, polls: int = 3, interval_seconds: int = 2) -> bool:
     last_size: int | None = None
     stable_count = 0
     for _ in range(max(1, polls)):
-        cmd = (
-            "python - <<'PY'\n"
-            "from pathlib import Path\n"
-            f"p = Path(r'''{remote_path}''')\n"
-            "print(p.stat().st_size if p.exists() else -1)\n"
-            "PY"
-        )
+        # 纯 shell 获取文件大小，如果文件不存在则返回 -1
+        cmd = f"stat -c %s {shlex.quote(remote_path)} 2>/dev/null || echo -1"
         out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
-        if code != 0:
-            raise TailiCloudToolError(err or out)
         try:
             size = int(out.strip())
         except ValueError:
@@ -425,3 +482,80 @@ def wait_for_remote_file_stable(host: str, port: int, user: str, password: str, 
     return False
 
 
+def download_remote_file_to_temp(host: str, port: int, user: str, password: str, remote_path: str, timeout_seconds: int, suffix: str = ".mp4") -> str:
+    local_dir = Path(tempfile.mkdtemp(prefix="taili-video-"))
+    local_path = local_dir / (Path(remote_path).name or f"video{suffix}")
+    fetch_remote_file(host, port, user, password, remote_path, str(local_path), timeout_seconds)
+    return str(local_path)
+
+
+def remote_file_exists(host: str, port: int, user: str, password: str, remote_path: str, timeout_seconds: int) -> bool:
+    """判断远端是否存在某个文件（续训前确认最优 checkpoint 仍在，避免 get_checkpoint_path 直接报错浪费一轮）。"""
+    if not remote_path:
+        return False
+    cmd = f"test -f {shlex.quote(remote_path)} && echo __YES__ || echo __NO__"
+    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
+    return "__YES__" in out
+
+
+def remote_log_contains(host: str, port: int, user: str, password: str, log_path: str, marker: str, timeout_seconds: int) -> bool:
+    """服务端整文件 grep 某个标志串（不受增量 byte-offset 窗口影响，用于确定性校验续训是否真的加载了 checkpoint）。"""
+    cmd = f"grep -F -q -- {shlex.quote(marker)} {shlex.quote(log_path)} && echo __YES__ || echo __NO__"
+    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
+    return "__YES__" in out
+
+
+def remote_find_latest_checkpoint(host: str, port: int, user: str, password: str, run_dir: str, timeout_seconds: int) -> str:
+    """在远端 run_dir 下找到迭代号最大的 model_*.pt（兜底用，正常应直接取 eval_meta.checkpoint）。
+
+    rsl_rl 的 checkpoint 命名为 ``model_<iter>.pt``。这里抽取出迭代号做数值排序，
+    取最大的一个并重组成完整路径。找不到时返回空串。
+    """
+    cmd = (
+        f"ls -1 {shlex.quote(run_dir)}/model_*.pt 2>/dev/null "
+        f"| sed 's#.*/model_##; s#\\.pt$##' | grep -E '^[0-9]+$' | sort -n | tail -n 1"
+    )
+    out, err, code = execute_ssh_command(host, port, user, password, cmd, timeout_seconds)
+    if code != 0 or not out.strip():
+        return ""
+    return posixpath.join(run_dir, f"model_{out.strip()}.pt")
+
+
+def download_checkpoint_bundle(
+    host: str, port: int, user: str, password: str,
+    checkpoint_remote: str, run_dir: str, local_dir: str, timeout_seconds: int,
+) -> dict:
+    """把一轮评估对应的"最优"checkpoint 物料下载到本地 local_dir。
+
+    会先清空 local_dir 以保证"唯一一份最优"，再按需下载以下内容（缺失项静默跳过，不报错）：
+      - 原始 RL checkpoint：checkpoint_remote（model_*.pt，可续训/即最优参数）
+      - 导出策略：run_dir/exported/policy.pt、policy.onnx（可直接部署推理）
+      - 配置快照：run_dir/params/env.yaml、agent.yaml（复现训练所需）
+
+    Returns:
+        {"local_dir": str, "files": {logical_name: local_path}, "missing": [logical_name, ...]}
+    """
+    local_dir_p = Path(local_dir)
+    # 清空旧的最优目录，避免上一份最优的残留文件与本份混淆
+    if local_dir_p.exists():
+        shutil.rmtree(local_dir_p, ignore_errors=True)
+    local_dir_p.mkdir(parents=True, exist_ok=True)
+
+    targets: list[tuple[str, str, Path]] = []
+    if checkpoint_remote:
+        targets.append(("checkpoint", checkpoint_remote, local_dir_p / posixpath.basename(checkpoint_remote)))
+    if run_dir:
+        targets.append(("exported_policy", posixpath.join(run_dir, "exported", "policy.pt"), local_dir_p / "policy.pt"))
+        targets.append(("exported_onnx", posixpath.join(run_dir, "exported", "policy.onnx"), local_dir_p / "policy.onnx"))
+        targets.append(("env_yaml", posixpath.join(run_dir, "params", "env.yaml"), local_dir_p / "env.yaml"))
+        targets.append(("agent_yaml", posixpath.join(run_dir, "params", "agent.yaml"), local_dir_p / "agent.yaml"))
+
+    got: dict[str, str] = {}
+    missing: list[str] = []
+    for name, remote, local in targets:
+        try:
+            fetch_remote_file(host, port, user, password, remote, str(local), timeout_seconds)
+            got[name] = str(local)
+        except Exception:
+            missing.append(name)
+    return {"local_dir": str(local_dir_p), "files": got, "missing": missing}
