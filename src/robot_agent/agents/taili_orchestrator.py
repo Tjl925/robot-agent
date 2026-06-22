@@ -41,11 +41,12 @@ from robot_agent.agents.taili_steps import (
 from robot_agent.schemas.config import TailiCloudConfig
 from robot_agent.schemas.state import (
     STATE_P2_ARCHIVE_COMPLETED,
+    STATE_P2_BEST_CHECKPOINT,
     STATE_P2_CONFIG_HISTORY,
     STATE_P2_CONFIG_MODE,
     STATE_P2_CONFIG_PARENT_VERSION,
     STATE_P2_CONFIG_VERSION,
-    STATE_P2_EVAL_FAIL_REASONS,
+    STATE_P2_EVAL_FAIL_REASON,
     STATE_P2_EVAL_PASSED,
     STATE_P2_EVENTS,
     STATE_P2_FAILURE_REASON,
@@ -129,22 +130,6 @@ class TailiOrchestratorAgent(BaseAgent):
             Event(author=self.name, actions=EventActions(state_delta=dict(ctx.session.state))),
         )
 
-    async def _append_config_revision(self, ctx: InvocationContext, reason: str) -> None:
-        # 当评估失败时，把当前配置版本写入 history，并切换到 revise 模式。
-        history = list(ctx.session.state.get(STATE_P2_CONFIG_HISTORY, []))
-        history.append(
-            {
-                "version": int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)),
-                "mode": ctx.session.state.get(STATE_P2_CONFIG_MODE, "create"),
-                "reason": reason,
-            }
-        )
-        ctx.session.state[STATE_P2_CONFIG_HISTORY] = history
-        ctx.session.state[STATE_P2_CONFIG_VERSION] = int(ctx.session.state.get(STATE_P2_CONFIG_VERSION, 0)) + 1
-        ctx.session.state[STATE_P2_CONFIG_MODE] = "revise"
-        ctx.session.state[STATE_P2_CONFIG_PARENT_VERSION] = int(ctx.session.state[STATE_P2_CONFIG_VERSION]) - 1
-        await self._commit_state(ctx)
-
     async def _run_step(self, ctx: InvocationContext, step_agent: BaseAgent) -> AsyncGenerator[Event, None]:
         # 统一封装“运行一步 + 提交状态”。
         async for event in step_agent.run_async(ctx):
@@ -155,17 +140,40 @@ class TailiOrchestratorAgent(BaseAgent):
         """格式化输出当前 session state 的关键 P2 字段，用于调试。"""
         import json as _json
         state = dict(ctx.session.state)
-        p2_state = {k: v for k, v in sorted(state.items()) if str(k).startswith("phase2.")}
+        
+        # 排除可能包含超大数据或大量重复样本的字段，防止终端输出爆炸
+        omit_keys = {
+            "phase2.train.metric_history",
+            "phase2.train.log_input_payload",
+            "phase2.config.generated_text",
+            "phase2.video.input_payload",
+            "phase2.play.stdout",
+        }
+        
+        p2_state = {}
+        for k, v in sorted(state.items()):
+            if str(k).startswith("phase2."):
+                if k in omit_keys:
+                    if isinstance(v, list):
+                        p2_state[k] = f"<list of length {len(v)} omitted>"
+                    elif isinstance(v, dict):
+                        p2_state[k] = f"<dict keys {list(v.keys())} omitted>"
+                    elif isinstance(v, str):
+                        p2_state[k] = f"<str of length {len(v)} omitted>"
+                    else:
+                        p2_state[k] = f"<{type(v).__name__} omitted>"
+                else:
+                    p2_state[k] = v
+
         header = f"\n{'='*60}\n[DEBUG] {label}\n{'='*60}"
         body = _json.dumps(p2_state, ensure_ascii=False, indent=2, default=str)
         footer = f"{'='*60}"
         return f"{header}\n{body}\n{footer}"
 
+
     # ====== 测试开关 ======
     # 设为 True 可跳过步骤 1~4（URDF→配置→文件→发布），直接从训练开始。
-    DEBUG_SKIP_PRE_TRAIN: bool = False
-    # 设为 True 在视频评估前暂停，打印全量 state 到终端后立即 return。
-    DEBUG_STOP_BEFORE_VIDEO: bool = False
+    DEBUG_SKIP_PRE_TRAIN: bool = True
 
     async def _handle_post_train(self, ctx: InvocationContext) -> None:
         """训练结束后的统一状态处理。
@@ -181,9 +189,9 @@ class TailiOrchestratorAgent(BaseAgent):
         # 只有 "completed" 才允许进入视频评估；其余状态一律标记失败。
         if train_status != "completed":
             ctx.session.state[STATE_P2_EVAL_PASSED] = False
-            fail_reasons = list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, []))
-            reason_text = "; ".join(str(r) for r in fail_reasons) if fail_reasons else f"训练未正常完成 (status={train_status})"
-            ctx.session.state[STATE_P2_HITL_REASON] = reason_text
+            fail_reason = ctx.session.state.get(STATE_P2_EVAL_FAIL_REASON, "")
+            reason_text = f"原因: {fail_reason}; 训练未正常完成 (status={train_status})"
+            ctx.session.state[STATE_P2_EVAL_FAIL_REASON] = reason_text
             await self._commit_state(ctx)
 
     @override
@@ -240,22 +248,13 @@ class TailiOrchestratorAgent(BaseAgent):
                 yield event
             await self._handle_post_train(ctx)
 
-            # 6. 如果训练完成（非 early_stopped / play_failed），进入视频评估。
+            # 6. 如果训练完成，进入视频评估。
             if ctx.session.state.get(STATE_P2_TRAIN_STATUS) == "completed":
-                if self.DEBUG_STOP_BEFORE_VIDEO:
-                    yield self._yield_text(self._format_debug_state(ctx, "收敛或训练完，视频评估前断点"))
-                    return
                 async for event in self._run_step(ctx, self.evaluate_video):
                     yield event
-            
-            yield self._yield_text(self._format_debug_state(ctx, "失败早停或视频渲染失败，revise迭代前断点"))
-            return
 
             # 7. 如果没通过，进入 revise 迭代，直到达到最大自动轮数。
             while not bool(ctx.session.state.get(STATE_P2_EVAL_PASSED, False)) and int(ctx.session.state.get(STATE_P2_ITER_ROUND, 0)) < int(ctx.session.state.get(STATE_P2_ITER_MAX, self.cfg.max_auto_iterations)):
-                failure_reasons = list(ctx.session.state.get(STATE_P2_EVAL_FAIL_REASONS, []))
-                reason = "; ".join(str(item) for item in failure_reasons) if failure_reasons else str(ctx.session.state.get(STATE_P2_HITL_REASON, "revise"))
-                await self._append_config_revision(ctx, reason=reason)
                 async for event in self._run_step(ctx, self.repair):
                     yield event
                 async for event in self._run_step(ctx, self.config_synthesis):
@@ -267,11 +266,7 @@ class TailiOrchestratorAgent(BaseAgent):
                 async for event in self._run_step(ctx, self.train):
                     yield event
                 await self._handle_post_train(ctx)
-                # 只有训练完成才进视频评估；early_stopped / play_failed 直接回到 while 顶部。
                 if ctx.session.state.get(STATE_P2_TRAIN_STATUS) == "completed":
-                    if self.DEBUG_STOP_BEFORE_VIDEO:
-                        yield self._yield_text(self._format_debug_state(ctx, "revise 后视频评估前断点"))
-                        return
                     async for event in self._run_step(ctx, self.evaluate_video):
                         yield event
 
@@ -282,7 +277,14 @@ class TailiOrchestratorAgent(BaseAgent):
                 ctx.session.state[STATE_P2_HITL_REASON] = str(ctx.session.state.get(STATE_P2_HITL_REASON, "达到最大自动迭代轮数，需人工介入"))
                 ctx.session.state[STATE_P2_STATUS] = "pending"
                 await self._commit_state(ctx)
-                yield self._yield_text("taili_phase2: 达到最大自动迭代轮数，进入 HITL")
+                best = ctx.session.state.get(STATE_P2_BEST_CHECKPOINT, {}) or {}
+                best_dir = best.get("local_dir", "")
+                best_note = (
+                    f"；当前最优 checkpoint(round={best.get('round')}, score={best.get('overall_score')}, "
+                    f"passed={best.get('overall_passed')}) 已保底下载至 {best_dir}"
+                    if best_dir else ""
+                )
+                yield self._yield_text(f"taili_phase2: 达到最大自动迭代轮数，进入 HITL{best_note}")
                 return
 
             # 9. 通过后归档输出。

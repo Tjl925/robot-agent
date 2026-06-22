@@ -1,8 +1,17 @@
 {
+  "remote_platform": "windows",
+  "windows_remote": {
+    "ssh_host": "10.14.14.2",
+    "ssh_port": 22,
+    "ssh_user": "xbtl",
+    "ssh_password": "",
+    "robot_lab_root": "e:/tjl/robot_lab",
+    "conda_env": "tjl"
+  },
   "phase1": {
     "api_base": "https://www.autodl.art",
     "token": "YOUR_AUTODL_TOKEN",
-    "instance_uuid": "pro-77486d141fd0",
+    "instance_uuid": "pro-7794af0e85f1",
     "app_name": "agents",
     "user_id": "local_user",
     "session_id": "agent_session"
@@ -10,68 +19,20 @@
   "phase2": {
     "local_robot_root": "taili_quad",
     "cloud_robot_lab_root": "/root/autodl-tmp/robot_lab",
+    "cloud_tmp_dir": "/root/autodl-tmp/robot_lab/tmp",
     "cloud_asset_path": "source/robot_lab/robot_lab/assets/taili_quad.py",
     "cloud_task_cfg_root": "source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/quadruped/taili_quad",
     "remote_timeout_seconds": 60,
-    "task_name": "RobotLab-Isaac-Velocity-Flat-Taili-Quad-v0",
-    "train_command_template": "cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless",
-    "play_command_template": "cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play.py --task={task_name} --headless --video",
-    "play_num_envs": null,
-    "play_timeout_seconds": 600,
+    "task_name": "RobotLab-Isaac-Velocity-Rough-Taili-Quad-v0",
+    "train_command_template": "eval \"$(conda shell.bash hook)\" && conda activate isaac_lab && cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/train.py --task={task_name} --headless",
+    "play_eval_timeout_seconds": 900,
+    "play_eval_command_template": "eval \"$(conda shell.bash hook)\" && conda activate isaac_lab && cd /root/autodl-tmp/robot_lab && python scripts/reinforcement_learning/rsl_rl/play_eval.py --task={task_name} --headless --video --num_envs=1 --eval_terrain={eval_terrain}",
     "eval_log_root": "/root/autodl-tmp/robot_lab/logs/rsl_rl",
-    "max_training_iterations": 1000,
     "eval_check_interval": 100,
     "eval_sample_window_size": 5,
-
-
-    "max_auto_iterations": 2,
-
-    "max_training_minutes": 240,
+    "max_auto_iterations": 4,
+    "max_training_minutes": 480,
     "hitl_response_text": null,
-    "eval_metric_specs": [
-      {
-        "name": "reward",
-        "direction": "up",
-        "importance": 1
-      },
-      {
-        "name": "policy_loss",
-        "direction": "down",
-        "importance": 1
-      },
-      {
-        "name": "value_loss",
-        "direction": "down",
-        "importance": 1
-      },
-      {
-        "name": "entropy",
-        "direction": "stable_or_down",
-        "importance": 1
-      },
-      {
-        "name": "success_rate",
-        "direction": "up",
-        "importance": 1
-      }
-    ],
-    "eval_early_stop_rules": [
-      {
-        "name": "nan_or_inf",
-        "condition": "logs contain nan/inf",
-        "action": "early_stop"
-      },
-      {
-        "name": "divergence",
-        "condition": "loss diverges or explodes",
-        "action": "early_stop"
-      },
-      {
-        "name": "stagnation",
-        "condition": "metrics stall far below expectation for multiple checks",
-        "action": "early_stop"
-      }
-    ],
     "app_name": "agents",
     "user_id": "local_user",
     "session_id": "agent_session"

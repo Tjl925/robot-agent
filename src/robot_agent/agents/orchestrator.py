@@ -8,10 +8,10 @@ from __future__ import annotations
 3. Phase-2 完成 Taili 配置生成、云端同步、训练、评估与迭代；
 4. 评估通过则归档，失败则进入 revise / HITL。
 
-你可以把它理解成整个项目真正的入口编排器。
+整个项目真正的入口编排器。
 """
 
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from typing_extensions import override
 
 from google.adk.agents import BaseAgent
@@ -31,6 +31,7 @@ from robot_agent.schemas.state import (
     STATE_P1_SSH_USER,
     STATE_P1_STAGE,
     STATE_P1_STATUS,
+    STATE_P1_USE_BACKUP,
     Phase1Stage,
     STATE_P2_FAILURE_REASON,
     STATE_P2_HITL_REASON,
@@ -48,15 +49,19 @@ class OrchestratorAgent(BaseAgent):
     phase2: TailiOrchestratorAgent
     auto_cfg: AutoDLConfig
     taili_cfg: TailiCloudConfig
+    remote_platform: str = "linux"
+    windows_cfg: Any = None
     model_config = {"arbitrary_types_allowed": True}
 
-    def __init__(self, auto_cfg: AutoDLConfig, taili_cfg: TailiCloudConfig):
-        phase1 = Phase1OrchestratorAgent(cfg=auto_cfg)
+    def __init__(self, auto_cfg: AutoDLConfig, taili_cfg: TailiCloudConfig, remote_platform: str = "linux", windows_cfg: Any = None):
+        phase1 = Phase1OrchestratorAgent(cfg=auto_cfg, remote_platform=remote_platform, windows_cfg=windows_cfg)
         phase2 = TailiOrchestratorAgent(cfg=taili_cfg)
         super().__init__(
             name="orchestrator",
             auto_cfg=auto_cfg,
             taili_cfg=taili_cfg,
+            remote_platform=remote_platform,
+            windows_cfg=windows_cfg,
             phase1=phase1,
             phase2=phase2,
             sub_agents=[phase1, phase2],
@@ -72,6 +77,45 @@ class OrchestratorAgent(BaseAgent):
         self.phase2.cfg.remote_port = int(ctx.session.state.get(STATE_P1_SSH_PORT, self.phase2.cfg.remote_port or 22))
         self.phase2.cfg.remote_user = str(ctx.session.state.get(STATE_P1_SSH_USER, self.phase2.cfg.remote_user or "root"))
         self.phase2.cfg.remote_password = str(ctx.session.state.get(STATE_P1_SSH_PASSWORD, self.phase2.cfg.remote_password or ""))
+
+        # Windows 直连：切换 Phase-2 到 pwsh 后端，并用 Windows 主机的远程地址覆盖全部云端路径与命令模板。
+        if self.remote_platform == "windows" and self.windows_cfg is not None:
+            win = self.windows_cfg
+            self.phase2.cfg.remote_platform = "windows"
+            self.phase2.cfg.cloud_robot_lab_root = win.robot_lab_root
+            self.phase2.cfg.cloud_tmp_dir = win.tmp_dir
+            self.phase2.cfg.cloud_asset_path = win.asset_path
+            self.phase2.cfg.cloud_task_cfg_root = win.task_cfg_root
+            self.phase2.cfg.eval_log_root = win.eval_log_root
+            self.phase2.cfg.train_command_template = win.train_command_template
+            self.phase2.cfg.play_eval_command_template = win.play_eval_command_template
+            return
+
+        # 如果使用了备用服务器，将前缀 /root/autodl-tmp/ 自动替换为 /root/gpufree-data/
+        use_backup = bool(ctx.session.state.get(STATE_P1_USE_BACKUP, False))
+        if use_backup:
+            old_prefix = "/root/autodl-tmp/"
+            new_prefix = "/root/gpufree-data/"
+
+            # 替换 cloud_robot_lab_root
+            if self.phase2.cfg.cloud_robot_lab_root and old_prefix in self.phase2.cfg.cloud_robot_lab_root:
+                self.phase2.cfg.cloud_robot_lab_root = self.phase2.cfg.cloud_robot_lab_root.replace(old_prefix, new_prefix)
+
+            # 替换 cloud_tmp_dir
+            if self.phase2.cfg.cloud_tmp_dir and old_prefix in self.phase2.cfg.cloud_tmp_dir:
+                self.phase2.cfg.cloud_tmp_dir = self.phase2.cfg.cloud_tmp_dir.replace(old_prefix, new_prefix)
+
+            # 替换 eval_log_root
+            if self.phase2.cfg.eval_log_root and old_prefix in self.phase2.cfg.eval_log_root:
+                self.phase2.cfg.eval_log_root = self.phase2.cfg.eval_log_root.replace(old_prefix, new_prefix)
+
+            # 替换 train_command_template
+            if self.phase2.cfg.train_command_template and old_prefix in self.phase2.cfg.train_command_template:
+                self.phase2.cfg.train_command_template = self.phase2.cfg.train_command_template.replace(old_prefix, new_prefix)
+
+            # 替换 play_eval_command_template
+            if self.phase2.cfg.play_eval_command_template and old_prefix in self.phase2.cfg.play_eval_command_template:
+                self.phase2.cfg.play_eval_command_template = self.phase2.cfg.play_eval_command_template.replace(old_prefix, new_prefix)
 
     def _phase2_is_waiting_human(self, ctx: InvocationContext) -> bool:
         return (
@@ -91,7 +135,9 @@ class OrchestratorAgent(BaseAgent):
             ctx.session.state[STATE_P1_STATUS] = "pending"
 
         try:
-            ctx.session.state[STATE_P1_STAGE] = Phase1Stage.POWER_ON
+            # Windows 直连不开机，阶段由 phase1 自行推进到 SSH_CONNECT；Linux 才从 POWER_ON 起步。
+            if self.remote_platform != "windows":
+                ctx.session.state[STATE_P1_STAGE] = Phase1Stage.POWER_ON
             async for event in self._run_phase(ctx, self.phase1):
                 yield event
 
@@ -106,7 +152,6 @@ class OrchestratorAgent(BaseAgent):
                 yield event
 
             if bool(ctx.session.state.get(STATE_P2_STATUS) == "succeeded"):
-                ctx.session.state[STATE_P2_STAGE] = Phase2Stage.DONE
                 ctx.session.state[STATE_P2_HITL_REQUIRED] = False
                 ctx.session.state[STATE_P2_HITL_REASON] = ""
                 await ctx.session_service.append_event(ctx.session, Event(author=self.name, actions=EventActions(state_delta=dict(ctx.session.state))))

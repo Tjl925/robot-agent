@@ -1,119 +1,83 @@
 # 机械狗多 Agent 项目总结 (PROJECT_SUMMARY.md)
 
-## 1. 项目定位与核心主线
-这是一个基于 **Google ADK** 的专用多 Agent 闭环自动化系统，**只面向一条固定主线**：
-- **本地输入**：`taili_quad/` (URDF 模型与 STL 资源)
-- **云端环境**：AutoDL 实例上的 `robot_lab` 强化学习框架
-- **最终目标**：LLM Agent 自主诊断 URDF、生成 PPO 算法与环境配置、同步到云端、驱动训练/自适应评估闭环，并在失败时自动迭代修复 (Revise) 或触发人工介入 (HITL)。
+## 1. 项目定位
+基于 **Google ADK** 的专用多 Agent 闭环系统，单一主线：本地 `taili_quad/`(URDF+STL) → 云端 AutoDL 上的 `robot_lab`(IsaacLab + rsl_rl)。LLM 自主诊断 URDF、生成 PPO/环境配置、同步云端、驱动训练 + 自适应评估闭环，失败自动 revise 或转人工(HITL)，最终交付一份最优 `.pt`。
 
 ---
 
-## 2. 核心架构与控制链路
+## 2. 整体架构
 
-### 2.1 顶层编排 (Phase 1 → Phase 2 Handoff)
-- **唯一入口**：`run.py` 启动 `OrchestratorAgent`。
-- **Phase 1**：`Phase1OrchestratorAgent` 自动控制 AutoDL 实例开机、探活，并将获取的 SSH 凭证 (`STATE_P1_SSH_*`) 无缝透传 (Handoff) 给 Phase 2。
-- **Phase 2**：`TailiOrchestratorAgent` 承接 SSH 凭证，在同一 Session 内驱动完整的机器人部署与训练评估流。
+### 2.1 两阶段编排
+- **唯一入口** `main.py` → `OrchestratorAgent`。
+- **Phase 1**（`Phase1OrchestratorAgent`）：AutoDL 开机 → 状态轮询 → SSH 探活，SSH 凭证 Handoff 给 Phase 2。
+- **Phase 2**（`TailiOrchestratorAgent`）：同一 Session 内驱动 `诊断 → 配置 → 发布 → 训练 → 评估 → 归档/迭代` 全流程，并**集中路由**所有成败/revise/HITL 跳转（Step Agent 不得越权改终态）。
 
-### 2.2 状态协议与三态退出 (Unified State Protocol)
-系统废弃了所有散乱的布尔退出标志，确立了以 `STATE_P2_TRAIN_STATUS` 为核心的**退出协议**：
-1. `"running"`：远端训练执行中，Agent 进行增量日志提取。
-2. `"early_stopped"`：日志裁判判定训练发散/崩溃，直接杀死远端进程，不渲染视频，标记评估失败并进入 Revise。
-3. `"completed"`：训练自然达到最大步数或被日志裁判判定为已收敛。训练 Agent 自动触发 `play.py` 渲染评估视频，并流转至视频裁判进行终期判定。
-4. `"play_failed"`：训练已完成但视频渲染命令报错，被及时拦截熔断，不执行视频评估，直接进入 Revise。
+### 2.2 训练退出协议（`STATE_P2_TRAIN_STATUS`）
+| 状态 | 后续 |
+|---|---|
+| `early_stopped` | 日志裁判判发散 → 杀进程、跳视频、进 revise |
+| `completed` | 正常完成/收敛 → 抓验收快照 → 渲染四地形视频 → 视频裁判 |
+| `play_failed` | 视频渲染报错 → 熔断、跳评估、进 revise |
+| `train_failed` | 训练非零退出 → 进 revise |
+| `train_timeout` | 超时强杀，但**抢救本轮最新 checkpoint** 后进 revise |
 
----
-
-## 3. Phase2 核心 Agent 职责分工
-
-| Agent 名称 | 职责定位 | 输入/输出协议 |
-| :--- | :--- | :--- |
-| **AnalyzeTailiUrdfStepAgent** | URDF 诊断专家 | 诊断机械狗结构的完整性与潜在训练风险。输出 `TailiUrdfAnalysisResult` JSON。 |
-| **TailiConfigSynthesisAgent** | 配置生成大脑 | 在 `create/revise` 模式下生成 6 个核心 Python 配置代码。输出 `TailiConfigDraft` JSON。 |
-| **GenerateTailiFilesStepAgent** | 本地代码落盘 | 将大模型生成的配置代码写入本地 `.taili_generated/` 目录。 |
-| **PublishTailiWorkspaceStepAgent** | 确定性云端发布 | 递归扫描本地资产，在云端按原相对结构动态建树，并通过 SFTP 部署全部资产。 |
-| **TrainTailiStepAgent** | 训练监控与早停控制 | 远端异步启动训练，提取增量日志，定期提取 checkpoint 指标，并在日志裁判建议早停时强行中止。最后渲染视频。 |
-| **EvaluateTailiTrainingLogAgent** | 日志采样趋势裁判 | 接收 `metric_history` 指标趋势，进行单次无状态判断。输出 `TailiTrainingLogJudgeResult`。 |
-| **EvaluateTailiVideoAgent** | 视频终审裁判 | 下载远端评估视频，进行最终视觉通过判定。输出 `TailiVideoJudgeResult`。 |
-| **RepairTailiWorkflowStepAgent** | 故障自愈迭代控制器 | 收集上一轮失败原因，更新迭代轮次，为下一轮配置 Revise 做准备。 |
-| **ArchiveTailiOutputsStepAgent** | 成果归档器 | 评估通过后，将最终配置路径与得分归档至 `STATE_P2_ARCHIVE_SUMMARY`。 |
-
----
-
-## 4. 重大技术痛点攻克与优化记录
-
-### 4.1 P0 级：增量日志拉取性能革命
-- **痛点**：原 `remote_tail_log` 每次使用 Python 脚本读取全量日志并回传。在长时训练中（日志常达数十 MB），会导致高带宽消耗与 SSH 连接频繁超时崩溃。
-- **解决**：改写为**字节偏移增量拉取机制**。新签名 `remote_tail_log(..., byte_offset)` 配合远端 `wc -c` 获取大小与 `tail -c +{offset+1}` 增量输出，每次仅拉取几百字节的新日志。同时完全移除了嵌入式 Python，避免了 `.bashrc` 输出的干扰。
-
-### 4.2 P0 级：视频渲染超时防御
-- **痛点**：视频渲染 `play.py` 通常耗时 2~5 分钟。原代码使用默认 of 60s SSH 超时，导致渲染步骤 100% 必然超时报错。
-- **解决**：在配置中引入独立的 `play_timeout_seconds`（默认 600s），为视频录制提供充足的缓冲时间。
-
-### 4.3 P1 级：检查点采样连续性修复
-- **痛点**：原 `TrainTailiStepAgent` 在长时休眠唤醒后，仅处理新增日志正则捕获的最后一个 block (`blocks[-1]`)，跳过了中间产生的多个 checkpoint 指标，导致裁判接收的指标趋势产生“严重断带”。
-- **解决**：重构为遍历追加所有 `idx > last_evaluated_iteration` 的 blocks，确保 `metric_history` 数据链 100% 连续。
-
-### 4.4 架构级：上下文瘦身与物理隔离
-- **痛点**：多轮 `revise` 时如果把全量历史代码塞入 prompt，会导致 Token 爆炸并干扰大模型生成。
-- **解决**：`phase2.config.history` 仅保存极简的“修改说明与版本号”摘要。配置生成 Agent 在 `revise` 模式下直接通过 Python 读取本地 `.taili_generated/` 真实代码文件并喂给 LLM。成功实现上下文瘦身与精确代码复用的完美平衡。
-
-### 4.5 规范级：100% 常量化与零硬编码
-- 彻底清理了 `state.py` 中 14 个冗余废弃状态键，新增 13 个专用常量，并把 `taili_steps.py` 和 `taili_orchestrator.py` 中的所有硬编码 `"phase2.train.xxx"` 字符串替换为统一常量，消除了拼写隐患。
+### 2.3 Phase 2 Agent 职责
+| Agent | 职责 |
+|---|---|
+| `AnalyzeTailiUrdfStepAgent` | 读本地 URDF，输出结构化风险诊断 |
+| `TailiConfigSynthesisAgent` | create/revise 生成 6 个 Python 配置；revise 只输出变更字段；失败标签→奖励旋钮提示；版本号系统自增 |
+| `GenerateTailiFilesStepAgent` | 配置落盘 `.taili_generated/`，按需局部覆写 |
+| `PublishTailiWorkspaceStepAgent` | 递归扫描资产，云端按原结构建树 + SFTP 部署 |
+| `TrainTailiStepAgent` | 异步起训、warm-start 续训+自检、byte-offset 增量日志、采样投喂日志裁判早停、时间预算 `--max_iterations` 截断、超时抢救、训练后抓验收快照 + 渲染四地形视频 |
+| `EvaluateTailiTrainingLogAgent` | 日志趋势裁判，单次无状态判 `continue/stop_failed/stop_converged` |
+| `EvaluateTailiVideoAgent` | Qwen 多模态视频打分 + `achieved_metrics` 客观数值硬闸(按地形分档) + 维护冠军/最优 `.pt` |
+| `RepairTailiWorkflowStepAgent` | 收集失败原因、推进迭代轮次、准备下一轮 revise |
+| `ArchiveTailiOutputsStepAgent` | 归档最终配置/得分/最优 `.pt` 落点/checkpoint 历史/验收快照 |
 
 ---
 
-## 5. 重大架构设计决策与 create / revise 协议
+## 3. 关键机制（系统当前能力）
 
-### 5.1 为什么拒绝在 State 堆积历史代码（架构决策）
-在早期版本中，系统尝试将历史生成的全量 Python 代码塞入 `ctx.session.state["phase2.config.history"]` 中以保留多轮记忆。这导致：
-1. 随着迭代轮次增加，Session 存储大小呈指数级爆炸，严重浪费内存；
-2. 每次状态同步和 API 调用都需要处理巨量文本，大模型经常产生幻觉或直接超出 Context Window。
-**最终决策**：**物理隔离设计**。把 State 里的 `history` 改为只保留轻量级的“差异说明、版本号和改动原因”。Agent 在 `revise` 模式下，直接由 Python 代码在本地磁盘读取旧版本真实代码，组合成紧凑的 Prompt 传给 LLM。
-
-### 5.2 `create` 与 `revise` 模式的明确契约
-
-#### 5.2.1 `create` 模式
-- **适用场景**：第一次部署 Taili 配置，本地尚未产生合规的历史代码。
-- **核心输入**：
-  - `reference_robot`：固定参考机器人（如 `unitree_b2`）的结构及参数模板
-  - `taili_urdf`：自研机械狗 URDF 模型原始文本与诊断报告
-  - `task_goal`：任务目标（如 velocity locomotion）
-- **核心输出**：第一版 `TailiConfigDraft`（含 6 个核心配置代码）。
-
-#### 5.2.2 `revise` 模式
-- **适用场景**：前一轮训练失败、日志报错或被视频裁判判定为不通过。
-- **核心输入**：
-  - 本地磁盘读取的当前版本真实代码文件
-  - `parent_version` 与轻量版 `history` 摘要
-  - `failure_evidence`：训练中捕获的 stderr 报错、断点指标数据或视频裁判给出的故障细节
-- **核心输出**：基于旧代码定向优化的新 `TailiConfigDraft`。
+- **增量日志拉取**：`remote_tail_log(..., byte_offset)` + 远端 `wc -c`/`tail -c`，每次只传新增几百字节，避免长训日志数十 MB 全量回传致 SSH 超时。
+- **create/revise + 局部覆写**：历史仅存极简摘要；revise 由 Agent 直接读本地真实代码喂 LLM，LLM 只输出变更字段，本地按需覆写。省 Token、防生成漂移。
+- **多模型协同**：DeepSeek 负责逻辑/配置/日志裁判，Qwen 负责视频打分（本地 MP4→Base64）。
+- **warm-start 续训**：存在历史最优 checkpoint 时追加 `--resume --load_run --checkpoint`（依云端 `cli_args.py` 的 store_true 裸旗标），迭代号接续累积；grep 远端 `Loading model checkpoint from` 自检，杜绝静默从零白练。续训源 `RESUME_SOURCE` 与"视频最优 best"**解耦**，completed/超时抢救轮均按统一标准更新。
+- **统一冠军排序 `_champion_rank_key`**：续训源与交付 best 共用。排序键 `(四地形视频全过 → 视频通过地形数 → 视频综合分 → terrain_levels → -error_vel_xy)`——**视频证据优先，terrain_levels 仅作打平兜底**（它是课程进度、会被碎步刷高，不能凌驾视频分）。record 带 `num_video_passed`（无视频轮记 -1）。
+- **最优 `.pt` 留存交付**：刷新冠军即把 `model_*.pt` + `policy.pt/onnx` + `params/*.yaml` 下载到 `logs/taili_best/`（含 `BEST_MANIFEST.json`），失败/HITL 也保底。
+- **视频客观数值硬闸 `_metric_gate`（声明式规则表 `_gate_rules`）**：`play_eval.py` 实测 `achieved_metrics` 写回 `eval_meta.json`，本地据此否决"速度达标但步态难看"的策略（只严不松）。阈值按地形分档（`gate_terrain_overrides`，楼梯放宽、平地最严）。规则表化后，加一种失败模式 = play_eval 加 1 个量 + 规则表加 1 行 + config 加 1 个阈值。
+  - **覆盖维度**：碎步家族（步频/摆动时长/步幅）、颠簸、速度/位移、reset；**碎步以外 4 维**（抬脚高度/拖地、触地打滑、跛行不对称、落地砸地）当前为 **metrics-only**（喂 VLM/修参，阈值默认 `None` 暂不否决，标定后开闸，见 `TESTING_PROGRESS.md` §3.2）。
+- **失败标签 → 奖励旋钮映射**：`failure_tag_to_knob_hints` 把 `high_step_frequency/short_stride/foot_clearance/foot_slip/gait_asymmetry/contact_impact/...` 映射到具体调参建议（如开启被禁用的 `feet_gait`、调 `feet_height`/`feet_slide`/`contact_forces` 等），让 revise 对症改参。
+- **训练最终验收快照**：训练完成后抓 `terrain_levels/error_vel_xy/error_vel_yaw` 对照目标（默认 `≥6 / ≤0.4 / ≤0.5`），仅作**只读标尺**，**绝不**参与日志裁判早停（避免为绝对目标死等到最大步数）。
+- **max_iterations 时间预算截断**：用预热实测每步耗时估墙钟内可达步数，超出则追加原生 `--max_iterations`，让训练自然 `completed` 而非被墙钟杀。注意 rsl_rl 该值是"本次新增步数"。
+- **掉线优雅退出**：`main.py` 的 `Tee` 写入吞错（断 `Exception ignored in` 级联），`main()` try/finally + `os._exit`，避免服务器掉线后残留非守护线程拖住进程。
 
 ---
 
-## 6. 避坑指南与生产环境排查路径 (核心资产)
+## 4. 避坑指南（核心资产）
 
-### 6.1 ADK 状态同步陷阱（重大踩坑点）
-- **现象**：在 Agent 代码中，如果仅通过 `ctx.session.state[KEY] = VALUE` 修改了内存中的状态，但在 Agent 退出或退出前没有显式调用编排器的 `await self._commit_state(ctx)` 或者 `append_event(..., state_delta=...)`，这些状态在多阶段序列化时会**彻底丢失**。
-- **规避**：任何对状态键（如训练状态、评估结果）的重要变更，务必通过 `append_event` 或统一的步骤封装进行原子同步。
-
-### 6.2 状态非法跳转与 Stage 控制陷阱
-- **现象**：非编排器（Orchestrator）的普通 Step Agent 如果越权、大跨度地在代码里直接改写 `ctx.session.state[STATE_P2_STAGE]` 等阶段枚举，会导致顶层 Orchestrator 路由状态机逻辑错乱，产生死循环或直接漏步。
-- **规避**：Step Agent 只负责在自己的职责内将 `STATE_P2_STAGE` 改为对应的当前运行阶段，所有的后续跳转决策（成功、失败、 revise、HITL）必须由编排器 `taili_orchestrator.py` 做集中路由，严禁 Step Agent 越权修改最终成败状态。
-
-### 6.3 远端训练失败排查路径
-当远端训练启动失败或未正常轮询到指标时，按以下优先级排查：
-1. **优先排查同步原因**：检查本地生成的配置文件是否成功同步到云端 `robot_lab`。路径不对、文件名拼写错误或云端权限问题是 90% 训练报错的根源。
-2. **检查 `phase2.train.command`**：通过 SSH 手动执行该命令，确认在云端是否能正常 import 对应模块。
-3. **检查 Checkpoint 通配符匹配**：确认云端产生的日志文件是否能正常被 Train Agent 的 `remote_tail_log` 捕获。
-4. **排除 `play.py` 超时**：确保 `play_timeout_seconds` 大于 300s，渲染不能使用 60s 默认超时。
-
-### 6.4 路径怀疑优先原则
-在多 Agent 系统调试中，一旦出现加载或执行报错，**永远优先怀疑路径与同步问题，不要急于修改大模型生成的算法逻辑**。95% 以上的问题都是由于 SFTP 上传没有对齐云端 `robot_lab` 的预期目录结构造成的。
+1. **ADK 状态同步**：仅 `ctx.session.state[K]=V` 改内存、不经 `append_event(state_delta=...)` 原子提交，多阶段序列化时会**丢失**。重要状态变更务必原子同步。
+2. **Stage 越权跳转**：Step Agent 只改自己阶段的 `STATE_P2_STAGE`，所有成败/revise/HITL 路由必须由 `taili_orchestrator.py` 集中决策。
+3. **远端失败排查顺序**：① 配置是否同步到云端正确路径（90% 报错根源）→ ② SSH 手动跑 `phase2.train.command` → ③ checkpoint 通配符匹配 → ④ `play_eval_timeout_seconds` > 300s。
+4. **路径怀疑优先**：加载/执行报错先怀疑路径与 SFTP 同步，别急于改 LLM 生成的算法逻辑。
+5. **核迭代数看 `Learning iteration X/Y` 或裁决报告"当前迭代数"**，不要把日志行号当迭代数（曾因此误判）。
 
 ---
 
-## 7. 快速调试与测试说明
-为方便断点调试，编排器中集成了两个类级测试开关：
-1. **`DEBUG_SKIP_PRE_TRAIN`** (`bool`)：设为 `True` 将跳过 URDF 分析、配置生成、文件落盘与云端同步，**直接从训练启动开始运行**（适用于云端配置已准备就绪的场景）。
-2. **`DEBUG_STOP_BEFORE_VIDEO`** (`bool`)：设为 `True` 将在训练与日志评估通过、视频渲染完毕后暂停，**在终端以高亮美化格式打印全量 `phase2.*` 状态字典**，然后立即返回，方便开发者在进入视频 LLM 评估前对状态进行终期校验。
+## 5. 配置与调试
+
+- **调试开关**：`DEBUG_SKIP_PRE_TRAIN`（跳过 URDF 诊断/配置/落盘/同步，直接起训；当前有意保持开启）。
+- **`cloud/` 本地镜像须手动回传**：`train.py`/`play_eval.py`/`cli_args.py`/`velocity_env_cfg.py`/`mdp/*`。其中 **`play_eval.py` 已插桩**（实测 `achieved_metrics`），**改后必须手动上传**回云端 `scripts/reinforcement_learning/rsl_rl/play_eval.py` 才生效。
+- **主要 config 键**（`configs/unified.json` 的 `phase2.*`，详见 `schemas/config.py`）：
+  - 续训/预算：`resume_from_best`、`iter_budget_cap_enabled`、`iter_budget_safety_ratio`
+  - 硬闸(碎步家族)：`metric_gate_enabled`、`robot_hip_height`、`gate_min_fwd_speed_ratio`、`gate_max_resets`、`gate_max_contact_freq_hz`、`gate_min_swing_time_s`、`gate_min_stride_norm`、`gate_max_bounce_ratio`、`gate_terrain_overrides`
+  - 硬闸(碎步以外，默认 `None`=仅观测，标定后填值开闸)：`gate_min_swing_clearance_m`、`gate_max_foot_slip_ratio`、`gate_max_foot_touchdown_cv`、`gate_max_diag_pair_diff`、`gate_max_p95_touchdown_grf_bw`
+  - 验收快照：`accept_metrics_enabled`、`accept_min_terrain_levels`、`accept_max_error_vel_xy`、`accept_max_error_vel_yaw`
+- **关键状态键**（`schemas/state.py`）：`phase2.train.resume_source`（续训源指针）、`phase2.train.iter_seconds`（预热每步耗时）、`phase2.checkpoint.history` / `phase2.best.checkpoint`（历史 / 冠军，含 `num_video_passed`）。
+
+---
+
+## 6. 演进记录（changelog）
+
+- **2026-06-08**：补最大缺口——最优 `.pt` 跨轮留存交付；warm-start 续训打通（修正 `--resume` 为 store_true）；视频评估升级为 `achieved_metrics` 数值硬闸 + 按地形分档 + 失败标签→旋钮；训练验收快照与早停解耦。
+- **2026-06-11**：一整轮真机审计定位"技能不跨轮累积"（续训源恒冻结首轮 `model_3400`、最优的超时轮被丢弃）。修 7 项：续训源解耦(`RESUME_SOURCE`) / 超时轮抢救 / 统一冠军排序(`_champion_rank_key`) / max_iter 时间预算截断 / 续训防发散(edit_limits) / 失败原因不串轮 / 版本号自增写回。
+- **2026-06-16**：第二轮真机审计。① **冠军排序键纠偏**——06-11 的键把 `terrain_levels` 排在视频分前、被碎步刷高致劣轮(round1=30)顶替优轮(round0=41.25)、越接力越差；改为视频证据优先、`terrain_levels` 兜底，record 加 `num_video_passed`。② **掉线优雅退出**（`Tee` 吞错 + `os._exit`）。③ **评估系统泛化**——`play_eval` 新增抬脚/打滑/跛行/砸地 4 维（metrics-only）、硬闸重构为声明式规则表 `_gate_rules`、config 新增 5 个阈值（默认 `None`）。
