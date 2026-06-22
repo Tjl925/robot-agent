@@ -1,7 +1,7 @@
 {
   "remote_platform": "windows",
   "windows_remote": {
-    "ssh_host": "100.81.254.37",
+    "ssh_host": "10.14.14.2",
     "ssh_port": 22,
     "ssh_user": "xbtl",
     "ssh_password": "",
